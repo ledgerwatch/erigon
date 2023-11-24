@@ -17,6 +17,7 @@
 package vm
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sort"
 
@@ -326,4 +327,354 @@ func enable7516(jt *JumpTable) {
 		numPop:      0,
 		numPush:     1,
 	}
+}
+
+// enableEOF applies the EOF changes.
+func enableEOF(jt *JumpTable) {
+	// Deprecate opcodes
+	undefined := &operation{
+		execute:     opUndefined,
+		constantGas: 0,
+		numPop:      0,
+		numPush:     0,
+		undefined:   true,
+	}
+	jt[CALLCODE] = undefined
+	jt[SELFDESTRUCT] = undefined
+	jt[JUMP] = undefined
+	jt[JUMPI] = undefined
+	jt[PC] = undefined
+
+	// TODO(racytech): Make sure everything is correct
+	// New opcodes
+	jt[RJUMP] = &operation{
+		execute:     opRjump,
+		constantGas: GasQuickStep,
+		numPop:      0,
+		numPush:     0,
+		terminal:    true,
+	}
+	jt[RJUMPI] = &operation{
+		execute:     opRjumpi,
+		constantGas: GasSwiftStep,
+		numPop:      1,
+		numPush:     0,
+	}
+	jt[RJUMPV] = &operation{
+		execute:     opRjumpv,
+		constantGas: GasSwiftStep,
+		numPop:      1,
+		numPush:     0,
+	}
+	jt[CALLF] = &operation{
+		execute:     opCallf,
+		constantGas: GasFastStep,
+		numPop:      0,
+		numPush:     0,
+	}
+	jt[RETF] = &operation{
+		execute:     opRetf,
+		constantGas: GasSwiftStep,
+		numPop:      0,
+		numPush:     0,
+		terminal:    true,
+	}
+	jt[JUMPF] = &operation{
+		execute:     opJumpf,
+		constantGas: GasFastStep,
+		numPop:      0,
+		numPush:     0,
+	}
+	jt[DUPN] = &operation{
+		execute:     opDupN,
+		constantGas: GasFastestStep,
+		numPop:      0,
+		numPush:     1,
+	}
+	jt[SWAPN] = &operation{
+		execute:     opSwapN,
+		constantGas: GasFastestStep,
+		numPop:      0,
+		numPush:     0,
+	}
+	jt[DATALOAD] = &operation{
+		execute:     opDataLoad,
+		constantGas: GasSwiftStep,
+		numPop:      1,
+		numPush:     1,
+	}
+	jt[DATALOADN] = &operation{
+		execute:     opDataLoad,
+		constantGas: GasFastestStep,
+		numPop:      0,
+		numPush:     1,
+	}
+	jt[DATASIZE] = &operation{
+		execute:     opDataSize,
+		constantGas: GasQuickStep,
+		numPop:      0,
+		numPush:     1,
+	}
+	jt[DATACOPY] = &operation{
+		execute:     opDataCopy,
+		constantGas: GasFastestStep,
+		dynamicGas:  gasDataCopyEIP7480,
+		numPop:      3,
+		numPush:     0,
+		memorySize:  memoryDataCopy,
+	}
+	jt[CREATE3] = &operation{
+		execute:     opCreate3,
+		constantGas: params.Create3Gas,
+		// dynamicGas:  gasCreate2,
+		numPop:     4,
+		numPush:    1,
+		memorySize: memoryCreate2,
+	}
+	jt[CREATE4] = &operation{
+		execute:     opCreate4,
+		constantGas: params.Create4Gas,
+		// dynamicGas:  gasCreate2,
+		numPop:     4,
+		numPush:    1,
+		memorySize: memoryCreate2,
+	}
+	jt[RETURNCONTRACT] = &operation{}
+}
+
+// opRjump implements the rjump opcode.
+func opRjump(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		code   = scope.Contract.CodeAt(scope.CodeSection)
+		offset = parseInt16(code[*pc+1:])
+	)
+	// move pc past op and operand (+3), add relative offset, subtract 1 to
+	// account for interpreter loop.
+	*pc = uint64(int64(*pc+3) + int64(offset) - 1)
+	return nil, nil
+}
+
+// opRjumpi implements the RJUMPI opcode
+func opRjumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	condition := scope.Stack.Pop()
+	if condition.BitLen() == 0 {
+		// Not branching, just skip over immediate argument.
+		*pc += 2
+		return nil, nil
+	}
+	return opRjump(pc, interpreter, scope)
+}
+
+// opRjumpv implements the RJUMPV opcode
+func opRjumpv(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		code  = scope.Contract.CodeAt(scope.CodeSection)
+		count = uint64(code[*pc+1])
+		idx   = scope.Stack.Pop()
+	)
+	if idx, overflow := idx.Uint64WithOverflow(); overflow || idx >= count {
+		// Index out-of-bounds, don't branch, just skip over immediate
+		// argument.
+		*pc += 1 + count*2
+		return nil, nil
+	}
+	offset := parseInt16(code[*pc+2+2*idx.Uint64():])
+	*pc = uint64(int64(*pc+2+count*2) + int64(offset) - 1)
+	return nil, nil
+}
+
+// opCallf implements the CALLF opcode
+func opCallf(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		code = scope.Contract.CodeAt(scope.CodeSection)
+		idx  = binary.BigEndian.Uint16(code[*pc+1:])
+		typ  = scope.Contract.Container.Types[scope.CodeSection]
+	)
+	if scope.Stack.Len()+int(typ.MaxStackHeight) >= 1024 {
+		return nil, fmt.Errorf("stack overflow")
+	}
+	retCtx := &ReturnContext{
+		Section:     scope.CodeSection,
+		Pc:          *pc + 3,
+		StackHeight: scope.Stack.Len() - int(typ.Input),
+	}
+	scope.ReturnStack = append(scope.ReturnStack, retCtx)
+	scope.CodeSection = uint64(idx)
+	*pc = 0
+	// *pc -= 1 // hacks xD
+	return nil, nil
+}
+
+// opRetf implements the RETF opcode
+func opRetf(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		last   = len(scope.ReturnStack) - 1
+		retCtx = scope.ReturnStack[last]
+	)
+	scope.ReturnStack = scope.ReturnStack[:last]
+	scope.CodeSection = retCtx.Section
+	*pc = retCtx.Pc - 1
+
+	// If returning from top frame, exit cleanly.
+	if len(scope.ReturnStack) == 0 {
+		return nil, errStopToken
+	}
+	return nil, nil
+}
+
+func opJumpf(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		code    = scope.Contract.CodeAt(scope.CodeSection)
+		section = binary.BigEndian.Uint16(code[*pc+1:])
+		typ     = scope.Contract.Container.Types[scope.CodeSection]
+	)
+	if scope.Stack.Len()+int(typ.MaxStackHeight) >= 1024 {
+		return nil, fmt.Errorf("stack overflow")
+	}
+	scope.CodeSection = uint64(section)
+	*pc = 0
+	return nil, nil
+}
+
+func opDupN(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	// TODO(racytech): not yet merged
+	return nil, nil
+}
+
+func opSwapN(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	// TODO(racytech): not yet merged
+	return nil, nil
+}
+
+func opDataLoad(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		index  = scope.Stack.Pop()
+		data   = scope.Contract.Data()
+		offset = int(index.Uint64()) // with overflow maybe?
+	)
+	if len(data) < 32 || len(data)-32 < offset {
+		return nil, ErrInvalidMemoryAccess
+	}
+	val := new(uint256.Int).SetBytes(data[offset : offset+32])
+	scope.Stack.Push(val)
+	return nil, nil
+}
+
+func opDataLoadN(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		code   = scope.Contract.CodeAt(scope.CodeSection)
+		data   = scope.Contract.Data()
+		offset = int(binary.BigEndian.Uint16(code[*pc+1:]))
+	)
+	if len(data) < 32 || len(data)-32 < offset {
+		return nil, ErrInvalidMemoryAccess
+	}
+	val := new(uint256.Int).SetBytes(data[offset : offset+32])
+	scope.Stack.Push(val)
+	return nil, nil
+}
+
+func opDataSize(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	dataSize := len(scope.Contract.Data())
+	val := new(uint256.Int).SetUint64(uint64(dataSize))
+	scope.Stack.Push(val)
+	return nil, nil
+}
+
+func opDataCopy(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		memOffset256 = scope.Stack.Pop()
+		dataIndex256 = scope.Stack.Pop()
+		size256      = scope.Stack.Pop()
+
+		data    = scope.Contract.Data()
+		dataLen = uint64(len(data))
+		src     = dataIndex256.Uint64()
+		dst     = memOffset256.Uint64()
+		size    = size256.Uint64()
+	)
+
+	if dataLen < size || dataLen-size < src {
+		return nil, ErrInvalidMemoryAccess
+	}
+
+	if size > 0 {
+		scope.Memory.Copy(dst, src, size)
+	}
+
+	return nil, nil
+}
+
+func opCreate3(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	if interpreter.readOnly {
+		return nil, ErrWriteProtection
+	}
+	var (
+		code             = scope.Contract.CodeAt(scope.CodeSection)
+		initContainerIdx = int(code[*pc+1])
+		endowment        = scope.Stack.Pop()
+		salt             = scope.Stack.Pop()
+		offset, size     = scope.Stack.Pop(), scope.Stack.Pop()
+		inputOffset      = offset.Uint64()
+		inputSize        = size.Uint64()
+		gas              = scope.Contract.Gas
+		input            = []byte{}
+		initContainer    = scope.Contract.Container.SubContainer[initContainerIdx]
+	)
+	*pc += 2
+
+	if inputSize > 0 {
+		input = scope.Memory.GetCopy(int64(inputOffset), int64(inputSize))
+	}
+	// Apply EIP150
+	gas -= gas / 64
+	scope.Contract.UseGas(gas)
+
+	stackValue := size
+
+	res, addr, returnGas, suberr := interpreter.evm.Create3(scope.Contract, input, initContainer, gas, &endowment, &salt)
+
+	// Push item on the stack based on the returned error.
+	if suberr != nil {
+		stackValue.Clear()
+	} else {
+		stackValue.SetBytes(addr.Bytes())
+	}
+
+	scope.Stack.Push(&stackValue)
+	scope.Contract.Gas += returnGas
+
+	if suberr == ErrExecutionReverted {
+		interpreter.returnData = res // set REVERT data to return data buffer
+		return res, nil
+	}
+	interpreter.returnData = nil // clear dirty return data buffer
+	return nil, nil
+}
+
+func opCreate4(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	// TODO(racytech): Add new TxType
+	// CREATE4 expects new transaction type = 4 which will carry initcodes
+	return nil, nil
+}
+
+func opReturnContract(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		code               = scope.Contract.CodeAt(scope.CodeSection)
+		deployContainerIdx = int(code[*pc+1])
+		auxDataOffset      = scope.Stack.Pop()
+		auxDataSize        = scope.Stack.Pop()
+		deployContainer    = scope.Contract.Container.SubContainer[deployContainerIdx]
+		auxData            = scope.Memory.GetPtr(int64(auxDataOffset.Uint64()), int64(auxDataSize.Uint64()))
+	)
+	var c Container
+	// NOTE(racytech): UnmarshalBinary checks for correct EOF format
+	// but it decodes entire container, which is a bit expensive. Do we need that?
+	// Can we do better?
+	if err := c.UnmarshalBinary(deployContainer); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidEOFInitcode, err)
+	}
+	// TODO(racytech): make sure this one refers to the same underlying slice as Container.SubContainer[deployContainerIdx]
+	deployContainer = append(deployContainer, auxData...)
+	return nil, nil
 }
