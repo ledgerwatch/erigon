@@ -5,19 +5,24 @@ import (
 	"sync"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/ledgerwatch/erigon-lib/gointerfaces/sentinel"
 	"github.com/ledgerwatch/erigon/cl/beacon/beaconevents"
 	"github.com/ledgerwatch/erigon/cl/beacon/beaconhttp"
 	"github.com/ledgerwatch/erigon/cl/beacon/building"
 	"github.com/ledgerwatch/erigon/cl/clparams"
 	"github.com/ledgerwatch/erigon/cl/phase1/forkchoice"
+	"github.com/ledgerwatch/erigon/cl/transition/machine"
 )
 
 type ValidatorApiHandler struct {
-	FC forkchoice.ForkChoiceStorage
+	FC      forkchoice.ForkChoiceStorage
+	Machine machine.Interface
 
 	BeaconChainCfg *clparams.BeaconChainConfig
 	GenesisCfg     *clparams.GenesisConfig
+	NetworkCfg     *clparams.NetworkConfig
 	Emitters       *beaconevents.Emitters
+	Sentinel       sentinel.SentinelClient
 
 	state *building.State
 

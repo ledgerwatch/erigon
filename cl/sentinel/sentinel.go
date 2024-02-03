@@ -79,9 +79,10 @@ type Sentinel struct {
 	db         persistence.RawBeaconBlockChain
 	indiciesDB kv.RoDB
 
-	discoverConfig       discover.Config
-	pubsub               *pubsub.PubSub
-	subManager           *GossipManager
+	discoverConfig discover.Config
+	pubsub         *pubsub.PubSub
+	subManager     *GossipManager
+
 	metrics              bool
 	listenForPeersDoneCh chan struct{}
 	logger               log.Logger
@@ -304,6 +305,10 @@ func (s *Sentinel) Stop() {
 	s.listener.Close()
 	s.subManager.Close()
 	s.host.Close()
+}
+
+func (s *Sentinel) LocalNode() *enode.LocalNode {
+	return s.listener.LocalNode()
 }
 
 func (s *Sentinel) String() string {

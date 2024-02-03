@@ -10,6 +10,8 @@ import (
 
 	"github.com/ledgerwatch/erigon/cl/sentinel/communication"
 	"github.com/ledgerwatch/erigon/cl/sentinel/communication/ssz_snappy"
+	"github.com/ledgerwatch/erigon/p2p/enode"
+	"github.com/prysmaticlabs/go-bitfield"
 
 	"github.com/c2h5oh/datasize"
 	"github.com/golang/snappy"
@@ -38,16 +40,22 @@ type BeaconRpcP2P struct {
 	beaconConfig *clparams.BeaconChainConfig
 	// genesisConfig is the configuration for the genesis block of the beacon chain.
 	genesisConfig *clparams.GenesisConfig
+	networkConfig *clparams.NetworkConfig
 }
 
 // NewBeaconRpcP2P creates a new BeaconRpcP2P struct and returns a pointer to it.
 // It takes a context, a sentinel.Sent
-func NewBeaconRpcP2P(ctx context.Context, sentinel sentinel.SentinelClient, beaconConfig *clparams.BeaconChainConfig, genesisConfig *clparams.GenesisConfig) *BeaconRpcP2P {
+func NewBeaconRpcP2P(ctx context.Context, sentinel sentinel.SentinelClient,
+	beaconConfig *clparams.BeaconChainConfig,
+	genesisConfig *clparams.GenesisConfig,
+	networkConfig *clparams.NetworkConfig,
+) *BeaconRpcP2P {
 	return &BeaconRpcP2P{
 		ctx:           ctx,
 		sentinel:      sentinel,
 		beaconConfig:  beaconConfig,
 		genesisConfig: genesisConfig,
+		networkConfig: networkConfig,
 	}
 }
 
@@ -189,6 +197,46 @@ func (b *BeaconRpcP2P) PropagateBlock(block *cltypes.SignedBeaconBlock) error {
 		Name: "beacon_block",
 	})
 	return err
+}
+
+func (b *BeaconRpcP2P) AdvertiseSubnetsForEpoch(ctx context.Context, epoch uint64) (func(), error) {
+	nodeInfo, err := b.sentinel.GetNodeInfo(ctx, &sentinel.EmptyMessage{})
+	if err != nil {
+		return nil, err
+	}
+	ids, err := b.networkConfig.ComputeSubscribedSubnets(enode.ID(nodeInfo.NodeId), epoch)
+	if err != nil {
+		return nil, err
+	}
+	bitvector := bitfield.NewBitvector64()
+	for _, v := range ids {
+		bitvector.SetBitAt(v, true)
+	}
+	topics := []string{}
+	for _, v := range ids {
+		topics = append(topics, fmt.Sprintf("beacon_attestation_%d", v))
+	}
+	ctx, cn := context.WithCancel(ctx)
+	sub, err := b.sentinel.SubscribeGossip(ctx, &sentinel.SubscriptionData{
+		Topics: topics,
+	})
+	if err != nil {
+		cn()
+		return nil, err
+	}
+	_, err = b.sentinel.UpdateEnr(ctx, &sentinel.EnrEntry{
+		Key:  b.networkConfig.AttSubnetKey,
+		Data: bitvector.Bytes(),
+	})
+	if err != nil {
+		cn()
+		return nil, err
+	}
+	return func() {
+		// server should unsubscribe at this point
+		cn()
+		sub.CloseSend()
+	}, nil
 }
 
 func (b *BeaconRpcP2P) BanPeer(pid string) {

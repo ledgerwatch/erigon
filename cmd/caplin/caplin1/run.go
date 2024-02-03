@@ -24,6 +24,7 @@ import (
 	"github.com/ledgerwatch/erigon/cl/rpc"
 	"github.com/ledgerwatch/erigon/cl/sentinel"
 	"github.com/ledgerwatch/erigon/cl/sentinel/service"
+	"github.com/ledgerwatch/erigon/cl/transition/impl/eth2"
 	"github.com/ledgerwatch/erigon/eth/ethconfig"
 	"github.com/ledgerwatch/erigon/params"
 	"github.com/ledgerwatch/erigon/turbo/snapshotsync/freezeblocks"
@@ -162,7 +163,7 @@ func RunCaplinPhase1(ctx context.Context, engine execution_client.ExecutionEngin
 		return err
 	}
 
-	beaconRpc := rpc.NewBeaconRpcP2P(ctx, sentinel, beaconConfig, genesisConfig)
+	beaconRpc := rpc.NewBeaconRpcP2P(ctx, sentinel, beaconConfig, genesisConfig, networkConfig)
 
 	gossipManager := network.NewGossipReceiver(sentinel, forkChoice, beaconConfig, genesisConfig, caplinFreezer, emitters)
 	{ // start ticking forkChoice
@@ -251,7 +252,10 @@ func RunCaplinPhase1(ctx context.Context, engine execution_client.ExecutionEngin
 			FC:             forkChoice,
 			BeaconChainCfg: beaconConfig,
 			GenesisCfg:     genesisConfig,
+			NetworkCfg:     networkConfig,
 			Emitters:       emitters,
+			Sentinel:       sentinel,
+			Machine:        &eth2.Impl{FullValidation: true},
 		}
 		go beacon.ListenAndServe(&beacon.LayeredBeaconHandler{
 			ValidatorApi: headApiHandler,
@@ -262,7 +266,7 @@ func RunCaplinPhase1(ctx context.Context, engine execution_client.ExecutionEngin
 
 	forkChoice.StartAttestationsRTT()
 
-	stageCfg := stages.ClStagesCfg(beaconRpc, antiq, genesisConfig, beaconConfig, state, engine, gossipManager, forkChoice, historyDB, indexDB, csn, dirs.Tmp, dbConfig, backfilling, syncedDataManager, emitters)
+	stageCfg := stages.ClStagesCfg(beaconRpc, antiq, genesisConfig, beaconConfig, networkConfig, state, engine, gossipManager, forkChoice, historyDB, indexDB, csn, dirs.Tmp, dbConfig, backfilling, syncedDataManager, emitters)
 	sync := stages.ConsensusClStages(ctx, stageCfg)
 
 	logger.Info("[Caplin] starting clstages loop")
