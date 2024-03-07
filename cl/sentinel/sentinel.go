@@ -248,8 +248,11 @@ func New(
 	s.peers = peers.NewPool()
 
 	mux := chi.NewRouter()
-	//	mux := httpreqresp.NewRequestHandler(host)
-	mux.Get("/", httpreqresp.NewRequestHandler(host))
+	handler := httpreqresp.NewRequestHandler(host)
+	mux.Group(func(r chi.Router) {
+		r.Mount("/", handler)
+	})
+
 	s.httpApi = mux
 
 	s.handshaker = handshake.New(ctx, cfg.GenesisConfig, cfg.BeaconConfig, s.httpApi)
