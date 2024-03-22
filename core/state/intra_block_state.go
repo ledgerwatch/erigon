@@ -288,7 +288,7 @@ func (sdb *IntraBlockState) HasSelfdestructed(addr libcommon.Address) bool {
 	if stateObject.deleted {
 		return false
 	}
-	if stateObject.createdContract {
+	if stateObject.newlyCreatedContract {
 		return false
 	}
 	return stateObject.selfdestructed
@@ -415,7 +415,7 @@ func (sdb *IntraBlockState) Selfdestruct(addr libcommon.Address) bool {
 		prevbalance: *stateObject.Balance(),
 	})
 	stateObject.markSelfdestructed()
-	stateObject.createdContract = false
+	stateObject.newlyCreatedContract = false
 	stateObject.data.Balance.Clear()
 
 	return true
@@ -427,7 +427,7 @@ func (sdb *IntraBlockState) Selfdestruct6780(addr libcommon.Address) {
 		return
 	}
 
-	if stateObject.newlyCreated {
+	if stateObject.newlyCreatedContract {
 		sdb.Selfdestruct(addr)
 	}
 }
@@ -529,7 +529,6 @@ func (sdb *IntraBlockState) createObject(addr libcommon.Address, previous *state
 	} else {
 		sdb.journal.append(resetObjectChange{account: &addr, prev: previous})
 	}
-	newobj.newlyCreated = true
 	sdb.setStateObject(addr, newobj)
 	return newobj
 }
@@ -568,7 +567,7 @@ func (sdb *IntraBlockState) CreateAccount(addr libcommon.Address, contractCreati
 	newObj.data.PrevIncarnation = prevInc
 
 	if contractCreation {
-		newObj.createdContract = true
+		newObj.newlyCreatedContract = true
 		newObj.data.Incarnation = prevInc + 1
 	} else {
 		newObj.selfdestructed = false
@@ -612,7 +611,7 @@ func updateAccount(EIP161Enabled bool, isAura bool, stateWriter StateWriter, add
 		}
 		stateObject.deleted = true
 	}
-	if isDirty && (stateObject.createdContract || !stateObject.selfdestructed) && !emptyRemoval {
+	if isDirty && (stateObject.newlyCreatedContract || !stateObject.selfdestructed) && !emptyRemoval {
 		stateObject.deleted = false
 		// Write any contract code associated with the state object
 		if stateObject.code != nil && stateObject.dirtyCode {
@@ -620,7 +619,7 @@ func updateAccount(EIP161Enabled bool, isAura bool, stateWriter StateWriter, add
 				return err
 			}
 		}
-		if stateObject.createdContract {
+		if stateObject.newlyCreatedContract {
 			if err := stateWriter.CreateContract(addr); err != nil {
 				return err
 			}
@@ -640,12 +639,12 @@ func printAccount(EIP161Enabled bool, addr libcommon.Address, stateObject *state
 	if stateObject.selfdestructed || (isDirty && emptyRemoval) {
 		fmt.Printf("delete: %x\n", addr)
 	}
-	if isDirty && (stateObject.createdContract || !stateObject.selfdestructed) && !emptyRemoval {
+	if isDirty && (stateObject.newlyCreatedContract || !stateObject.selfdestructed) && !emptyRemoval {
 		// Write any contract code associated with the state object
 		if stateObject.code != nil && stateObject.dirtyCode {
 			fmt.Printf("UpdateCode: %x,%x\n", addr, stateObject.CodeHash())
 		}
-		if stateObject.createdContract {
+		if stateObject.newlyCreatedContract {
 			fmt.Printf("CreateContract: %x\n", addr)
 		}
 		stateObject.printTrie()
@@ -680,7 +679,7 @@ func (sdb *IntraBlockState) FinalizeTx(chainRules *chain.Rules, stateWriter Stat
 		if err := updateAccount(chainRules.IsSpuriousDragon, chainRules.IsAura, stateWriter, addr, so, true); err != nil {
 			return err
 		}
-		so.newlyCreated = false
+		so.newlyCreatedContract = false
 		sdb.stateObjectsDirty[addr] = struct{}{}
 	}
 	// Invalidate journal because reverting across transactions is not allowed.
