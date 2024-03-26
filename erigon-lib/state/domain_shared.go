@@ -1179,18 +1179,22 @@ func (sdc *SharedDomainsCommitmentContext) LatestCommitmentState(tx kv.Tx, cd *D
 		txn, _ := _decodeTxBlockNums(value)
 		//fmt.Printf("[commitment] Seek found committed txn %d block %d\n", txn, bn)
 		if txn >= sinceTx && txn <= untilTx {
+			log.Warn("[dbg] zero1?", "l", len(value), "bn", blockNum, "ViewID", tx.ViewID(), "files", len(cd.files))
 			state = value
 		}
+
 		return nil
 	}); err != nil {
 		return 0, 0, nil, fmt.Errorf("failed to seek commitment, IteratePrefix: %w", err)
 	}
 
 	if len(state) < 16 {
+		log.Warn("[dbg] zero2?", "bn", blockNum, "ViewID", tx.ViewID(), "files", len(cd.files))
 		return 0, 0, nil, nil
 	}
 
 	txNum, blockNum = _decodeTxBlockNums(state)
+	log.Warn("[dbg] zero3?", "bn", blockNum, "ViewID", tx.ViewID(), "files", len(cd.files))
 	return blockNum, txNum, state, nil
 }
 
