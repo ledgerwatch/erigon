@@ -30,6 +30,7 @@ func init() {
 }
 
 func DeployChildChainSender(ctx context.Context, deployerName string) (context.Context, error) {
+	logger := devnet.Logger(ctx)
 	deployer := accounts.GetAccount(deployerName)
 	ctx = devnet.WithCurrentNetwork(ctx, networkname.BorDevnetChainName)
 
@@ -50,19 +51,21 @@ func DeployChildChainSender(ctx context.Context, deployerName string) (context.C
 		return nil, err
 	}
 
+	logger.Info("Awaiting DeployChildSender transaction", "hash", transaction.Hash())
 	block, err := waiter.Await(transaction.Hash())
 
 	if err != nil {
 		return nil, err
 	}
 
-	devnet.Logger(ctx).Info("ChildSender deployed", "chain", networkname.BorDevnetChainName, "block", block.Number, "addr", address)
+	logger.Info("ChildSender deployed", "chain", networkname.BorDevnetChainName, "block", block.Number, "addr", address)
 
 	return scenarios.WithParam(ctx, "childSenderAddress", address).
 		WithParam("childSender", contract), nil
 }
 
 func DeployRootChainReceiver(ctx context.Context, deployerName string) (context.Context, error) {
+	logger := devnet.Logger(ctx)
 	deployer := accounts.GetAccount(deployerName)
 	ctx = devnet.WithCurrentNetwork(ctx, networkname.DevChainName)
 
@@ -77,35 +80,38 @@ func DeployRootChainReceiver(ctx context.Context, deployerName string) (context.
 
 	heimdall := services.Heimdall(ctx)
 
-	address, transaction, contract, err := contracts.DeployChildSender(auth, backend, heimdall.RootChainAddress())
+	address, transaction, contract, err := contracts.DeployRootReceiver(auth, backend, heimdall.RootChainAddress())
 
 	if err != nil {
 		return nil, err
 	}
 
+	logger.Info("Awaiting deploy root receiver tx", "hash", transaction.Hash())
 	block, err := waiter.Await(transaction.Hash())
 
 	if err != nil {
 		return nil, err
 	}
 
-	devnet.Logger(ctx).Info("RootReceiver deployed", "chain", networkname.BorDevnetChainName, "block", block.Number, "addr", address)
+	logger.Info("RootReceiver deployed", "chain", networkname.BorDevnetChainName, "block", block.Number, "addr", address)
 
 	return scenarios.WithParam(ctx, "rootReceiverAddress", address).
 		WithParam("rootReceiver", contract), nil
 }
 
-func ProcessChildTransfers(ctx context.Context, sourceName string, numberOfTransfers int, minTransfer int, maxTransfer int) error {
+func ProcessChildTransfers(ctx context.Context, sourceName string, numberOfTransfers int, minTransfer int) error {
+	logger := devnet.Logger(ctx)
 	source := accounts.GetAccount(sourceName)
+	childChainCtx := devnet.WithCurrentNetwork(ctx, networkname.BorDevnetChainName)
 	ctx = devnet.WithCurrentNetwork(ctx, networkname.DevChainName)
 
-	auth, err := contracts.TransactOpts(ctx, source.Address)
+	auth, err := contracts.TransactOpts(childChainCtx, source.Address)
 
 	if err != nil {
 		return err
 	}
 
-	sender, _ := scenarios.Param[*contracts.ChildSender](ctx, "childSender")
+	sender, _ := scenarios.Param[*contracts.ChildSender](childChainCtx, "childSender")
 
 	receiver, _ := scenarios.Param[*contracts.RootReceiver](ctx, "rootReceiver")
 	receiverAddress, _ := scenarios.Param[libcommon.Address](ctx, "rootReceiverAddress")
@@ -123,12 +129,13 @@ func ProcessChildTransfers(ctx context.Context, sourceName string, numberOfTrans
 	Address, _ := abi.NewType("address", "", nil)
 
 	args := abi.Arguments{
+		{Name: "rootStateReceiver", Type: Address},
 		{Name: "from", Type: Address},
 		{Name: "amount", Type: Uint256},
 	}
 
-	heimdall := services.Heimdall(ctx)
-	proofGenerator := services.ProofGenerator(ctx)
+	heimdall := services.Heimdall(childChainCtx)
+	proofGenerator := services.ProofGenerator(childChainCtx)
 
 	var sendTxHashes []libcommon.Hash
 	var lastTxBlockNum *big.Int
@@ -140,7 +147,7 @@ func ProcessChildTransfers(ctx context.Context, sourceName string, numberOfTrans
 		amount := accounts.EtherAmount(float64(minTransfer))
 
 		err = func() error {
-			waiter, cancel := blocks.BlockWaiter(ctx, blocks.CompletionChecker)
+			waiter, cancel := blocks.BlockWaiter(childChainCtx, blocks.CompletionChecker)
 			defer cancel()
 
 			transaction, err := sender.SendToRoot(auth, amount)
@@ -149,10 +156,11 @@ func ProcessChildTransfers(ctx context.Context, sourceName string, numberOfTrans
 				return err
 			}
 
+			logger.Info("Waiting for SendToRoot transaction", "hash", transaction.Hash())
 			block, terr := waiter.Await(transaction.Hash())
 
 			if terr != nil {
-				node := devnet.SelectBlockProducer(ctx)
+				node := devnet.SelectBlockProducer(childChainCtx)
 
 				traceResults, err := node.TraceTransaction(transaction.Hash())
 
@@ -211,10 +219,10 @@ func ProcessChildTransfers(ctx context.Context, sourceName string, numberOfTrans
 					return fmt.Errorf("Unexpected arg type: expected: %T, got %T", libcommon.Address{}, values[0])
 				}
 
-				sentAmount, ok := values[1].(*big.Int)
+				sentAmount, ok := values[2].(*big.Int)
 
 				if !ok {
-					return fmt.Errorf("Unexpected arg type: expected: %T, got %T", &big.Int{}, values[1])
+					return fmt.Errorf("Unexpected arg type: expected: %T, got %T", &big.Int{}, values[2])
 				}
 
 				if recceiverAddressValue != receiverAddress {
@@ -244,39 +252,55 @@ func ProcessChildTransfers(ctx context.Context, sourceName string, numberOfTrans
 		auth.Nonce = (&big.Int{}).Add(auth.Nonce, big.NewInt(1))
 	}
 
-	devnet.Logger(ctx).Info("Waiting for checkpoint")
+	logger.Info("Awaiting checkpoint", "lastTxBlockNum", lastTxBlockNum)
+	err = heimdall.AwaitCheckpoint(childChainCtx, lastTxBlockNum)
 
-	err = heimdall.AwaitCheckpoint(ctx, lastTxBlockNum)
+	if err != nil {
+		return err
+	}
+
+	rootReceiver := accounts.GetAccount("root-funder")
+	rootAuth, err := contracts.TransactOpts(ctx, rootReceiver.Address)
 
 	if err != nil {
 		return err
 	}
 
 	for _, hash := range sendTxHashes {
-		payload, err := proofGenerator.GenerateExitPayload(ctx, hash, receiptTopic, 0)
-
-		waiter, cancel := blocks.BlockWaiter(ctx, blocks.CompletionChecker)
-		defer cancel()
+		payload, err := proofGenerator.GenerateExitPayload(childChainCtx, hash, receiptTopic, 0)
 
 		if err != nil {
 			return err
 		}
 
-		transaction, err := receiver.ReceiveMessage(auth, payload)
+		err = func() error {
+			waiter, cancel := blocks.BlockWaiter(ctx, blocks.CompletionChecker)
+			defer cancel()
+
+			transaction, err := receiver.ReceiveMessage(rootAuth, payload)
+
+			if err != nil {
+				return err
+			}
+
+			logger.Info("Awaiting ReceiveMessage transaction", "hash", transaction.Hash())
+			if _, err := waiter.Await(transaction.Hash()); err != nil {
+				return err
+			}
+
+			return nil
+		}()
 
 		if err != nil {
 			return err
 		}
 
-		if _, err := waiter.Await(transaction.Hash()); err != nil {
-			return err
-		}
-
+		rootAuth.Nonce = (&big.Int{}).Add(rootAuth.Nonce, big.NewInt(1))
 	}
 
 	receivedCount := 0
 
-	devnet.Logger(ctx).Info("Waiting for receive events")
+	logger.Info("Waiting for receive events")
 
 	for received := range receivedChan {
 		if received.Source != source.Address {

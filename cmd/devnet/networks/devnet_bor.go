@@ -10,7 +10,7 @@ import (
 	"github.com/ledgerwatch/erigon/cmd/devnet/accounts"
 	"github.com/ledgerwatch/erigon/cmd/devnet/args"
 	"github.com/ledgerwatch/erigon/cmd/devnet/devnet"
-	account_services "github.com/ledgerwatch/erigon/cmd/devnet/services/accounts"
+	accountservices "github.com/ledgerwatch/erigon/cmd/devnet/services/accounts"
 	"github.com/ledgerwatch/erigon/cmd/devnet/services/polygon"
 	"github.com/ledgerwatch/erigon/cmd/utils"
 	"github.com/ledgerwatch/erigon/core/types"
@@ -45,7 +45,7 @@ func NewBorDevnetWithoutHeimdall(
 			GasLimit: gasLimit,
 		},
 		Services: []devnet.Service{
-			account_services.NewFaucet(networkname.BorDevnetChainName, faucetSource),
+			accountservices.NewFaucet(networkname.BorDevnetChainName, faucetSource),
 		},
 		Nodes: []devnet.Node{
 			&args.BlockProducer{
@@ -85,10 +85,15 @@ func NewBorDevnetWithHeimdall(
 ) devnet.Devnet {
 	faucetSource := accounts.NewAccount("faucet-source")
 
-	var services []devnet.Service
+	var devnetServices, borServices []devnet.Service
 	if heimdall != nil {
-		services = append(services, heimdall)
+		devnetServices = append(devnetServices, heimdall)
+		borServices = append(borServices, heimdall)
 	}
+
+	devnetServices = append(devnetServices, accountservices.NewFaucet(networkname.DevChainName, faucetSource))
+	borServices = append(borServices, accountservices.NewFaucet(networkname.BorDevnetChainName, faucetSource))
+	borServices = append(borServices, polygon.NewProofGenerator()) // note heimdall needs to be before proof generator
 
 	var nodes []devnet.Node
 
@@ -117,21 +122,20 @@ func NewBorDevnetWithHeimdall(
 		BaseRPCPort:        baseRpcPort,
 		BorStateSyncDelay:  5 * time.Second,
 		BorWithMilestones:  &withMilestones,
-		Services:           append(services, account_services.NewFaucet(networkname.BorDevnetChainName, faucetSource)),
+		Services:           borServices,
 		Genesis: &types.Genesis{
 			Alloc: types.GenesisAlloc{
 				faucetSource.Address: {Balance: accounts.EtherAmount(200_000)},
 			},
 			GasLimit: gasLimit,
 		},
-		Nodes: append(nodes,
-			&args.BlockConsumer{
-				NodeArgs: args.NodeArgs{
-					ConsoleVerbosity: strconv.Itoa(int(consoleLogLevel)),
-					DirVerbosity:     strconv.Itoa(int(dirLogLevel)),
-					HeimdallURL:      heimdallURL,
-				},
-			}),
+		Nodes: append(nodes, &args.BlockConsumer{
+			NodeArgs: args.NodeArgs{
+				ConsoleVerbosity: strconv.Itoa(int(consoleLogLevel)),
+				DirVerbosity:     strconv.Itoa(int(dirLogLevel)),
+				HeimdallURL:      heimdallURL,
+			},
+		}),
 	}
 
 	devNetwork := devnet.Network{
@@ -142,7 +146,7 @@ func NewBorDevnetWithHeimdall(
 		BasePrivateApiAddr: "localhost:10190",
 		BaseRPCHost:        baseRpcHost,
 		BaseRPCPort:        baseRpcPort + 1000,
-		Services:           append(services, account_services.NewFaucet(networkname.DevChainName, faucetSource)),
+		Services:           devnetServices,
 		Genesis: &types.Genesis{
 			Alloc: types.GenesisAlloc{
 				faucetSource.Address:    {Balance: accounts.EtherAmount(200_000)},
@@ -200,7 +204,8 @@ func NewBorDevnetWithRemoteHeimdall(
 		withMilestones,
 		logger,
 		consoleLogLevel,
-		dirLogLevel)
+		dirLogLevel,
+	)
 }
 
 func NewBorDevnetWithLocalHeimdall(
@@ -230,7 +235,8 @@ func NewBorDevnetWithLocalHeimdall(
 			CheckpointBufferTime: 60 * time.Second,
 			CheckpointAccount:    checkpointOwner,
 		},
-		logger)
+		logger,
+	)
 
 	return NewBorDevnetWithHeimdall(
 		dataDir,
@@ -243,5 +249,8 @@ func NewBorDevnetWithLocalHeimdall(
 		gasLimit,
 		// milestones are not supported yet on the local heimdall
 		false,
-		logger, consoleLogLevel, dirLogLevel)
+		logger,
+		consoleLogLevel,
+		dirLogLevel,
+	)
 }

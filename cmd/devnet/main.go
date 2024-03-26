@@ -29,7 +29,7 @@ import (
 	"github.com/ledgerwatch/erigon/cmd/devnet/services/polygon"
 	"github.com/ledgerwatch/erigon/cmd/utils/flags"
 	"github.com/ledgerwatch/erigon/params"
-	erigon_app "github.com/ledgerwatch/erigon/turbo/app"
+	erigonapp "github.com/ledgerwatch/erigon/turbo/app"
 	"github.com/ledgerwatch/erigon/turbo/debug"
 	"github.com/ledgerwatch/erigon/turbo/logging"
 )
@@ -222,7 +222,7 @@ func connectDiagnosticsIfEnabled(ctx *cli.Context, logger log.Logger) {
 	metricsEnabled := ctx.Bool(MetricsEnabledFlag.Name)
 	diagnosticsUrl := ctx.String(DiagnosticsURLFlag.Name)
 	if metricsEnabled && len(diagnosticsUrl) > 0 {
-		err := erigon_app.ConnectDiagnostics(ctx, logger)
+		err := erigonapp.ConnectDiagnostics(ctx, logger)
 		if err != nil {
 			logger.Error("app.ConnectDiagnostics failed", "err", err)
 		}
@@ -327,12 +327,12 @@ func allScenarios(cliCtx *cli.Context, runCtx devnet.Context) scenarios.Scenario
 		},
 		"child-chain-exit": {
 			Steps: []*scenarios.Step{
+				{Text: "InitSubscriptions", Args: []any{[]requests.SubMethod{requests.Methods.ETHNewHeads}}},
 				{Text: "CreateAccountWithFunds", Args: []any{networkname.DevChainName, "root-funder", 200.0}},
 				{Text: "CreateAccountWithFunds", Args: []any{networkname.BorDevnetChainName, "child-funder", 200.0}},
 				{Text: "DeployRootChainReceiver", Args: []any{"root-funder"}},
 				{Text: "DeployChildChainSender", Args: []any{"child-funder"}},
-				{Text: "ProcessChildTransfers", Args: []any{"child-funder", 1, 2, 2}},
-				//{Text: "BatchProcessTransfers", Args: []any{"child-funder", 1, 10, 2, 2}},
+				{Text: "ProcessChildTransfers", Args: []any{"child-funder", 1, 2}},
 			},
 		},
 		"block-production": {

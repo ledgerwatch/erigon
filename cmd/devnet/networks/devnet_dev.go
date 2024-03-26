@@ -3,13 +3,14 @@ package networks
 import (
 	"strconv"
 
+	"github.com/ledgerwatch/log/v3"
+
 	"github.com/ledgerwatch/erigon-lib/chain/networkname"
 	"github.com/ledgerwatch/erigon/cmd/devnet/accounts"
 	"github.com/ledgerwatch/erigon/cmd/devnet/args"
 	"github.com/ledgerwatch/erigon/cmd/devnet/devnet"
-	account_services "github.com/ledgerwatch/erigon/cmd/devnet/services/accounts"
+	accountservices "github.com/ledgerwatch/erigon/cmd/devnet/services/accounts"
 	"github.com/ledgerwatch/erigon/core/types"
-	"github.com/ledgerwatch/log/v3"
 )
 
 func NewDevDevnet(
@@ -54,7 +55,7 @@ func NewDevDevnet(
 			GasLimit: gasLimit,
 		},
 		Services: []devnet.Service{
-			account_services.NewFaucet(networkname.DevChainName, faucetSource),
+			accountservices.NewFaucet(networkname.DevChainName, faucetSource),
 		},
 		MaxNumberOfEmptyBlockChecks: 30,
 		Nodes: append(nodes,
