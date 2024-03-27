@@ -69,6 +69,16 @@ func (tr *TRand) RandWithdrawal() *Withdrawal {
 	}
 }
 
+func (tr *TRand) RandDeposit() *Deposit {
+	return &Deposit{
+		Pubkey:                [pLen]byte(tr.RandBytes(pLen)),
+		WithdrawalCredentials: [wLen]byte(tr.RandBytes(wLen)),
+		Amount:                *tr.RandUint64(),
+		Signature:             [sLen]byte(tr.RandBytes(sLen)),
+		Index:                 *tr.RandUint64(),
+	}
+}
+
 func (tr *TRand) RandHeader() *Header {
 	wHash := tr.RandHash()
 	pHash := tr.RandHash()
@@ -210,11 +220,21 @@ func (tr *TRand) RandWithdrawals(size int) []*Withdrawal {
 	}
 	return withdrawals
 }
+
+func (tr *TRand) RandDeposits(size int) []*Deposit {
+	deposits := make([]*Deposit, size)
+	for i := 0; i < size; i++ {
+		deposits[i] = tr.RandDeposit()
+	}
+	return deposits
+}
+
 func (tr *TRand) RandRawBody() *RawBody {
 	return &RawBody{
-		Transactions: tr.RandRawTransactions(tr.RandIntInRange(1, 6)),
-		Uncles:       tr.RandHeaders(tr.RandIntInRange(1, 6)),
-		Withdrawals:  tr.RandWithdrawals(tr.RandIntInRange(1, 6)),
+		// Transactions: tr.RandRawTransactions(tr.RandIntInRange(1, 6)),
+		Uncles:      tr.RandHeaders(tr.RandIntInRange(1, 6)),
+		Withdrawals: tr.RandWithdrawals(tr.RandIntInRange(1, 6)),
+		Deposits:    tr.RandDeposits(tr.RandIntInRange(1, 6)),
 	}
 }
 
@@ -241,6 +261,7 @@ func (tr *TRand) RandBody() *Body {
 		Transactions: tr.RandTransactions(tr.RandIntInRange(1, 6)),
 		Uncles:       tr.RandHeaders(tr.RandIntInRange(1, 6)),
 		Withdrawals:  tr.RandWithdrawals(tr.RandIntInRange(1, 6)),
+		Deposits:     tr.RandDeposits(tr.RandIntInRange(1, 6)),
 	}
 }
 
@@ -311,13 +332,13 @@ func compareTransactions(t *testing.T, a, b Transaction) {
 	check(t, "Tx.S", s1, s2)
 }
 
-// func compareDeposits(t *testing.T, a, b *Deposit) {
-// 	check(t, "Deposit.Pubkey", a.Index, b.Index)
-// 	check(t, "Deposit.WithdrawalCredentials", a.WithdrawalCredentials, b.WithdrawalCredentials)
-// 	check(t, "Deposit.Amount", a.Amount, b.Amount)
-// 	check(t, "Deposit.Signature", a.Signature, b.Signature)
-// 	check(t, "Deposit.Index", a.Index, b.Index)
-// }
+func compareDeposits(t *testing.T, a, b *Deposit) {
+	check(t, "Deposit.Pubkey", a.Index, b.Index)
+	check(t, "Deposit.WithdrawalCredentials", a.WithdrawalCredentials, b.WithdrawalCredentials)
+	check(t, "Deposit.Amount", a.Amount, b.Amount)
+	check(t, "Deposit.Signature", a.Signature, b.Signature)
+	check(t, "Deposit.Index", a.Index, b.Index)
+}
 
 func compareRawBodies(t *testing.T, a, b *RawBody) error {
 
@@ -348,6 +369,15 @@ func compareRawBodies(t *testing.T, a, b *RawBody) error {
 
 	for i := 0; i < awLen; i++ {
 		compareWithdrawals(t, a.Withdrawals[i], b.Withdrawals[i])
+	}
+
+	adLen, bdLen := len(a.Deposits), len(b.Deposits)
+	if adLen != bdLen {
+		return fmt.Errorf("deposits len mismatch: expected: %v, got: %v", adLen, bdLen)
+	}
+
+	for i := 0; i < adLen; i++ {
+		compareDeposits(t, a.Deposits[i], b.Deposits[i])
 	}
 
 	return nil
@@ -382,41 +412,41 @@ func compareBodies(t *testing.T, a, b *Body) error {
 		compareWithdrawals(t, a.Withdrawals[i], b.Withdrawals[i])
 	}
 
-	// adLen, bdLen := len(a.deposits), len(b.deposits)
-	// if adLen != bdLen {
-	// 	return fmt.Errorf("deposits len mismatch: expected: %v, got: %v", adLen, bdLen)
-	// }
+	adLen, bdLen := len(a.Deposits), len(b.Deposits)
+	if adLen != bdLen {
+		return fmt.Errorf("deposits len mismatch: expected: %v, got: %v", adLen, bdLen)
+	}
 
-	// for i := 0; i < adLen; i++ {
-	// 	compareDeposits(t, a.deposits[i], b.deposits[i])
-	// }
+	for i := 0; i < adLen; i++ {
+		compareDeposits(t, a.Deposits[i], b.Deposits[i])
+	}
 
 	return nil
 }
 
-// func TestRawBodyEncodeDecodeRLP(t *testing.T) {
-// 	tr := NewTRand()
-// 	var buf bytes.Buffer
-// 	for i := 0; i < RUNS; i++ {
-// 		enc := tr.RandRawBody()
-// 		buf.Reset()
-// 		if err := enc.EncodeRLP(&buf); err != nil {
-// 			t.Errorf("error: RawBody.EncodeRLP(): %v", err)
-// 		}
+func TestRawBodyEncodeDecodeRLP(t *testing.T) {
+	tr := NewTRand()
+	var buf bytes.Buffer
+	for i := 0; i < RUNS; i++ {
+		enc := tr.RandRawBody()
+		buf.Reset()
+		if err := enc.EncodeRLP(&buf); err != nil {
+			t.Errorf("error: RawBody.EncodeRLP(): %v", err)
+		}
 
-// 		s := rlp.NewStream(bytes.NewReader(buf.Bytes()), 0)
+		s := rlp.NewStream(bytes.NewReader(buf.Bytes()), 0)
 
-// 		dec := &RawBody{}
-// 		if err := dec.DecodeRLP(s); err != nil {
-// 			t.Errorf("error: RawBody.DecodeRLP(): %v", err)
-// 			panic(err)
-// 		}
+		dec := &RawBody{}
+		if err := dec.DecodeRLP(s); err != nil {
+			t.Errorf("error: RawBody.DecodeRLP(): %v", err)
+			panic(err)
+		}
 
-// 		if err := compareRawBodies(t, enc, dec); err != nil {
-// 			t.Errorf("error: compareRawBodies: %v", err)
-// 		}
-// 	}
-// }
+		if err := compareRawBodies(t, enc, dec); err != nil {
+			t.Errorf("error: compareRawBodies: %v", err)
+		}
+	}
+}
 
 func TestBodyEncodeDecodeRLP(t *testing.T) {
 	tr := NewTRand()
