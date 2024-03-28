@@ -154,6 +154,7 @@ func (g *GossipManager) onRecv(ctx context.Context, data *sentinel.GossipData, l
 		if err := operationsContract[*cltypes.SignedAggregateAndProof](ctx, g, l, data, int(version), "aggregate and proof", g.forkChoice.OnAggregateAndProof); err != nil {
 			return err
 		}
+
 	default:
 		switch {
 		case gossip.IsTopicBlobSidecar(data.Name):
@@ -203,6 +204,19 @@ func (g *GossipManager) onRecv(ctx context.Context, data *sentinel.GossipData, l
 			}
 
 			log.Debug("Received blob sidecar via gossip", "index", *data.SubnetId, "size", datasize.ByteSize(len(blobSideCar.Blob)))
+		case gossip.IsTopicSyncCommittee(data.Name):
+			if data.SubnetId == nil {
+				return fmt.Errorf("missing subnet id")
+			}
+			msg := &cltypes.SyncCommitteeMessage{}
+			if err := msg.DecodeSSZ(common.CopyBytes(data.Data), int(version)); err != nil {
+				g.sentinel.BanPeer(ctx, data.Peer)
+				l["at"] = "decoding sync committee message"
+				return err
+			}
+			if err := g.forkChoice.OnSyncCommitteeMessage(msg, *data.SubnetId); err != nil {
+				return err
+			}
 		default:
 		}
 	}
