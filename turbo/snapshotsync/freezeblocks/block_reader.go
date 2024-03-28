@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"time"
+
+	"github.com/ledgerwatch/log/v3"
 
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
-	"github.com/ledgerwatch/log/v3"
+	"github.com/ledgerwatch/erigon/polygon/bor"
 
 	"github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/dbg"
@@ -1167,7 +1170,7 @@ func (r *BlockReader) BorStartEventID(ctx context.Context, tx kv.Tx, hash common
 
 func (r *BlockReader) EventsByBlock(ctx context.Context, tx kv.Tx, hash common.Hash, blockHeight uint64) ([]rlp.RawValue, error) {
 	maxBlockNumInFiles := r.FrozenBorBlocks()
-	if maxBlockNumInFiles == 0 || blockHeight > maxBlockNumInFiles {
+	if tx != nil && (maxBlockNumInFiles == 0 || blockHeight > maxBlockNumInFiles) {
 		c, err := tx.Cursor(kv.BorEventNums)
 		if err != nil {
 			return nil, err
@@ -1248,6 +1251,53 @@ func (r *BlockReader) EventsByBlock(ctx context.Context, tx kv.Tx, hash common.H
 		}
 	}
 	return result, nil
+}
+
+func (r *BlockReader) EventsByIdFromSnapshot(from uint64, to time.Time, limit int) []*heimdall.EventRecordWithTime {
+	view := r.borSn.View()
+	defer view.Close()
+
+	segments := view.Events()
+	var buf []byte
+	var result []*heimdall.EventRecordWithTime
+	stateContract := bor.GenesisContractStateReceiverABI()
+
+	for _, sn := range segments {
+		idxBorTxnHash := sn.Index()
+
+		if idxBorTxnHash == nil {
+			continue
+		}
+		if idxBorTxnHash.KeyCount() == 0 {
+			continue
+		}
+
+		offset := idxBorTxnHash.OrdinalLookup(0)
+		gg := sn.MakeGetter()
+		gg.Reset(offset)
+		for gg.HasNext() {
+			buf, _ = gg.Next(buf[:0])
+
+			raw := rlp.RawValue(common.Copy(buf[length.Hash+length.BlockNum+8:]))
+			event := heimdall.UnpackEventRecordWithTime(stateContract, raw)
+			if event.ID < from {
+				continue
+			}
+
+			result = append(result, event)
+
+			if event.Time.After(to) {
+				// we return an extra record to signify that we exit because of time and not limit
+				goto BREAK
+			}
+			if len(result) == limit {
+				goto BREAK
+			}
+		}
+	}
+
+BREAK:
+	return result
 }
 
 func (r *BlockReader) LastEventId(_ context.Context, tx kv.Tx) (uint64, bool, error) {
@@ -1372,7 +1422,7 @@ func (r *BlockReader) Span(ctx context.Context, tx kv.Getter, spanId uint64) ([]
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], spanId)
 	maxBlockNumInFiles := r.FrozenBorBlocks()
-	if maxBlockNumInFiles == 0 || endBlock > maxBlockNumInFiles {
+	if tx != nil && (maxBlockNumInFiles == 0 || endBlock > maxBlockNumInFiles) {
 		v, err := tx.GetOne(kv.BorSpans, buf[:])
 		if err != nil {
 			return nil, err
@@ -1415,20 +1465,23 @@ func (r *BlockReader) Span(ctx context.Context, tx kv.Getter, spanId uint64) ([]
 }
 
 func (r *BlockReader) LastSpanId(_ context.Context, tx kv.Tx) (uint64, bool, error) {
-	sCursor, err := tx.Cursor(kv.BorSpans)
-	if err != nil {
-		return 0, false, err
-	}
-
-	defer sCursor.Close()
-	k, _, err := sCursor.Last()
-	if err != nil {
-		return 0, false, err
-	}
-
 	var lastSpanId uint64
-	if k != nil {
-		lastSpanId = binary.BigEndian.Uint64(k)
+	var k []byte
+	if tx != nil {
+		sCursor, err := tx.Cursor(kv.BorSpans)
+		if err != nil {
+			return 0, false, err
+		}
+
+		defer sCursor.Close()
+		k, _, err = sCursor.Last()
+		if err != nil {
+			return 0, false, err
+		}
+
+		if k != nil {
+			lastSpanId = binary.BigEndian.Uint64(k)
+		}
 	}
 
 	snapshotLastSpanId := r.LastFrozenSpanId()
