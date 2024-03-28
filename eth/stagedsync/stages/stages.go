@@ -37,6 +37,7 @@ var (
 	Bodies              SyncStage = "Bodies"          // Block bodies are downloaded, TxHash and UncleHash are getting verified
 	Senders             SyncStage = "Senders"         // "From" recovered from signatures, bodies re-written
 	Execution           SyncStage = "Execution"       // Executing each block w/o buildinf a trie
+	CustomTrace         SyncStage = "CustomTrace"     // Executing each block w/o buildinf a trie
 	Translation         SyncStage = "Translation"     // Translation each marked for translation contract (from EVM to TEVM)
 	VerkleTrie          SyncStage = "VerkleTrie"
 	IntermediateHashes  SyncStage = "IntermediateHashes"  // Generate intermediate hashes, calculate the state root hash
@@ -68,6 +69,7 @@ var AllStages = []SyncStage{
 	Bodies,
 	Senders,
 	Execution,
+	CustomTrace,
 	Translation,
 	HashState,
 	IntermediateHashes,
@@ -89,7 +91,7 @@ func GetStageProgress(db kv.Getter, stage SyncStage) (uint64, error) {
 }
 
 func SaveStageProgress(db kv.Putter, stage SyncStage, progress uint64) error {
-	return db.Put(kv.SyncStageProgress, []byte(stage), marshalData(progress))
+	return db.Put(kv.SyncStageProgress, []byte(stage), encodeBigEndian(progress))
 }
 
 // GetStagePruneProgress retrieves saved progress of given sync stage from the database
@@ -102,11 +104,7 @@ func GetStagePruneProgress(db kv.Getter, stage SyncStage) (uint64, error) {
 }
 
 func SaveStagePruneProgress(db kv.Putter, stage SyncStage, progress uint64) error {
-	return db.Put(kv.SyncStageProgress, []byte("prune_"+stage), marshalData(progress))
-}
-
-func marshalData(blockNumber uint64) []byte {
-	return encodeBigEndian(blockNumber)
+	return db.Put(kv.SyncStageProgress, []byte("prune_"+stage), encodeBigEndian(progress))
 }
 
 func unmarshalData(data []byte) (uint64, error) {

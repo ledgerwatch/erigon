@@ -130,6 +130,23 @@ func DefaultStages(ctx context.Context,
 				return PruneExecutionStage(p, tx, exec, ctx, firstCycle)
 			},
 		},
+		//{
+		//	ID:          stages.CustomTrace,
+		//	Description: "Re-Execute blocks on history state - with custom tracer",
+		//	Disabled:    !bodies.historyV3 || dbg.StagesOnlyBlocks,
+		//	Forward: func(firstCycle bool, badBlockUnwind bool, s *StageState, u Unwinder, txc wrap.TxContainer, logger log.Logger) error {
+		//		cfg := StageCustomTraceCfg(exec.db, exec.prune, exec.dirs, exec.blockReader, exec.chainConfig, exec.engine, exec.genesis, &exec.syncCfg)
+		//		return SpawnCustomTrace(s, txc, cfg, ctx, firstCycle, 0, logger)
+		//	},
+		//	Unwind: func(firstCycle bool, u *UnwindState, s *StageState, txc wrap.TxContainer, logger log.Logger) error {
+		//		cfg := StageCustomTraceCfg(exec.db, exec.prune, exec.dirs, exec.blockReader, exec.chainConfig, exec.engine, exec.genesis, &exec.syncCfg)
+		//		return UnwindCustomTrace(u, s, txc, cfg, ctx, logger)
+		//	},
+		//	Prune: func(firstCycle bool, p *PruneState, tx kv.RwTx, logger log.Logger) error {
+		//		cfg := StageCustomTraceCfg(exec.db, exec.prune, exec.dirs, exec.blockReader, exec.chainConfig, exec.engine, exec.genesis, &exec.syncCfg)
+		//		return PruneCustomTrace(p, tx, cfg, ctx, firstCycle, logger)
+		//	},
+		//},
 		{
 			ID:          stages.HashState,
 			Description: "Hash the key in the state",
@@ -313,7 +330,7 @@ func PipelineStages(ctx context.Context, snapshots SnapshotsCfg, blockHashCfg Bl
 		{
 			ID:          stages.HashState,
 			Description: "Hash the key in the state",
-			Disabled:    exec.historyV3 && ethconfig.EnableHistoryV4InTest,
+			Disabled:    exec.historyV3,
 			Forward: func(firstCycle bool, badBlockUnwind bool, s *StageState, u Unwinder, txc wrap.TxContainer, logger log.Logger) error {
 				return SpawnHashStateStage(s, txc.Tx, hashState, ctx, logger)
 			},
@@ -327,7 +344,7 @@ func PipelineStages(ctx context.Context, snapshots SnapshotsCfg, blockHashCfg Bl
 		{
 			ID:          stages.IntermediateHashes,
 			Description: "Generate intermediate hashes and computing state root",
-			Disabled:    exec.historyV3 && ethconfig.EnableHistoryV4InTest,
+			Disabled:    exec.historyV3,
 			Forward: func(firstCycle bool, badBlockUnwind bool, s *StageState, u Unwinder, txc wrap.TxContainer, logger log.Logger) error {
 				if exec.chainConfig.IsOsaka(0) {
 					_, err := SpawnVerkleTrie(s, u, txc.Tx, trieCfg, ctx, logger)
@@ -697,6 +714,7 @@ func StateStages(ctx context.Context, headers HeadersCfg, bodies BodiesCfg, bloc
 		{
 			ID:          stages.HashState,
 			Description: "Hash the key in the state",
+			Disabled:    bodies.historyV3,
 			Forward: func(firstCycle bool, badBlockUnwind bool, s *StageState, u Unwinder, txc wrap.TxContainer, logger log.Logger) error {
 				return SpawnHashStateStage(s, txc.Tx, hashState, ctx, logger)
 			},
@@ -707,6 +725,7 @@ func StateStages(ctx context.Context, headers HeadersCfg, bodies BodiesCfg, bloc
 		{
 			ID:          stages.IntermediateHashes,
 			Description: "Generate intermediate hashes and computing state root",
+			Disabled:    bodies.historyV3,
 			Forward: func(firstCycle bool, badBlockUnwind bool, s *StageState, u Unwinder, txc wrap.TxContainer, logger log.Logger) error {
 				_, err := SpawnIntermediateHashesStage(s, u, txc.Tx, trieCfg, ctx, logger)
 				return err
@@ -757,6 +776,7 @@ var DefaultUnwindOrder = UnwindOrder{
 	stages.HashState,
 	stages.IntermediateHashes,
 
+	stages.CustomTrace,
 	stages.Execution,
 	stages.Senders,
 

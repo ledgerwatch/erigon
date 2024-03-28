@@ -1,3 +1,28 @@
+## Snapshots (synonym of segments/shards) overview
+
+- What is "snaphots"? - It's way to store "cold" data outside of main database. It's not 'temporary' files -
+  it's `frozen db` where stored old blocks/history/etc... Most important: it's "building block" for future "sync Archive
+  node without execution all blocks from genesis" (will release this feature in Erigon3).
+
+- When snapshots are created? - Blocks older than 90K (`FullImmutabilityThreshold`) are moved from DB to files
+  in-background
+
+- Where snapshots are stored? - `datadir/snapshots` - you can symlink/mount it to cheaper disk.
+
+- When snapshots are pulled? - Erigon download snapshots **only-once** when creating node - all other files are
+  self-generated
+
+- How does it benefit the new nodes? - P2P and Becaon networks may have not enough good peers for old data (no
+  incentives). StageSenders results are included into blocks snaps - means new node can skip it.
+
+- How network benefit? - Serve immutable snapshots can use cheaper infrastructure: Bittorrent/S3/R2/etc... - because
+  there is no incentive. Polygon mainnet is 12Tb now. Also Beacon network is very bad in serving old data.
+
+- How does it benefit current nodes? - Erigon's db is 1-file (doesens of Tb of nvme) - which is not friendly for
+  maintainance. Can't mount `hot` data to 1 type of disk and `cold` to another. Erigon2 moving only Blocks to snaps
+  but Erigon3 also moving there `cold latest state` and `state history` - means new node doesn't need re-exec all blocks
+  from genesis.
+
 # Downloader
 
 Service to seed/download historical data (snapshots, immutable .seg files) by
@@ -180,3 +205,100 @@ crontab -e
 
 It does push to branch `auto`, before release - merge `auto` to `main` manually
 
+## Create seedbox to support network
+
+```
+# Can run on empty datadir
+downloader --datadir=<your> --chain=mainnet
+```
+
+## Launch new network or new type of snapshots
+
+Usually Erigon's network is self-sufficient - peers automatically producing and
+seedingsnapshots. But new network or new type of snapshots need Bootstraping
+step - no peers yet have this files.
+
+**WebSeed** - is centralized file-storage - used to Bootstrap network. For
+example S3 with signed_url.
+
+Erigon dev team can share existing **webseed_url**. Or you can create own.
+
+```
+downloader --datadir=<your> --chain=mainnet --webseed=<webseed_url>
+
+# See also: `downloader --help` of `--webseed` flag. There is an option to pass it by `datadir/webseed.toml` file.   
+```
+
+---------------
+
+## E3
+
+Git branch `e35`. Just start erigon as you usually do.
+
+RAM requirement is higher: 32gb and better 64gb. We will work on this topic a bit later.
+
+Golang 1.21
+
+Almost all RPC methods are implemented - if something doesn't work - just drop it on our head.
+
+Supported networks: all (which supported by E2).
+
+### E3 changes from E2:
+
+- Sync from scratch doesn't require re-exec all history. Latest state and it's history are in snapshots - can download.
+- ExecutionStage - now including many E2 stages: stage_hash_state, stage_trie, stage_log_index, stage_history_index,
+  stage_trace_index
+- E3 can execute 1 historical transaction - without executing it's block - because history/indices have
+  transaction-granularity, instead of block-granularity.
+- Doesn't store Receipts/Logs - it always re-executing historical transactions - but re-execution is cheaper (see point
+  above). We would like to see how it will impact users - welcome feedback. Likely we will try add some small LRU-cache
+  here. Likely later we will add optional flag "to persist receipts".
+- More cold-start-friendly and os-pre-fetch-friendly.
+- datadir/chaindata is small now - to prevent it's grow: we recommend set --batchSize <= 1G. Probably 512mb is
+  enough.
+
+### E3 datadir structure
+
+```
+datadir        
+    chaindata   # "Recently-updated Latest State" and "Recent History"
+    snapshots   
+        domain    # Latest State: link to fast disk
+        history   # Historical values 
+        idx       # InvertedIndices: can search/filtering/union/intersect them - to find historical data. like eth_getLogs or trace_transaction
+        accessors # Additional (generated) indices of history - have "random-touch" read-pattern. They can serve only `Get` requests (no search/filters).
+    temp # buffers to sort data >> RAM. sequential-buffered IO - is slow-disk-friendly
+   
+# There is 4 domains: account, storage, code, commitment 
+```
+
+### E3 can store state on fast disk and history on slow disk
+
+If you can afford store datadir on 1 nvme-raid - great. If can't - it's possible to store history on cheap drive.
+
+```
+# place (or ln -s) `datadir` on slow disk. link some sub-folders to fast disk.
+# Example: what need link to fast disk to speedup execution
+datadir        
+    chaindata   # link to fast disk
+    snapshots   
+        domain    # link to fast disk
+        history   
+        idx       
+        accessors 
+    temp   
+
+# Example: how to speedup history access: 
+#   - go step-by-step - first try store `accessors` on fast disk
+#   - if speed is not good enough: `idx`
+#   - if still not enough: `history` 
+```
+
+### E3 public test goals
+
+- to gather RPC-usability feedback:
+    - E3 doesn't store receipts, using totally different indices, etc...
+    - It may behave different on warious stress-tests
+- to gather datadadir-usability feedback
+- discover bad data
+    - re-gen of snapshts takes much time, better fix data-bugs in-advance

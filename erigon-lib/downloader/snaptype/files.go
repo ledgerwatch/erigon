@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -30,7 +31,6 @@ import (
 
 	"github.com/ledgerwatch/erigon-lib/common/cmp"
 	"github.com/ledgerwatch/erigon-lib/common/dir"
-	"golang.org/x/exp/slices"
 )
 
 var (
@@ -107,6 +107,8 @@ func ParseFileName(dir, fileName string) (res FileInfo, isE3Seedable bool, ok bo
 		return res, false, true
 	}
 	isStateFile := IsStateFile(fileName)
+	res.name = fileName
+	res.Path = filepath.Join(dir, fileName)
 	return res, isStateFile, isStateFile
 }
 
@@ -182,7 +184,7 @@ func IsStateFile(name string) (ok bool) {
 	return true
 }
 
-const Erigon3SeedableSteps = 32
+const Erigon3SeedableSteps = 64
 
 // Use-cases:
 //   - produce and seed snapshots earlier on chain tip. reduce depnedency on "good peers with history" at p2p-network.
@@ -291,9 +293,6 @@ func ParseDir(dir string) (res []FileInfo, err error) {
 		res = append(res, meta)
 	}
 	slices.SortFunc(res, func(i, j FileInfo) int {
-		if i.Version != j.Version {
-			return cmp.Compare(i.Version, j.Version)
-		}
 		if i.From != j.From {
 			return cmp.Compare(i.From, j.From)
 		}
@@ -302,6 +301,9 @@ func ParseDir(dir string) (res []FileInfo, err error) {
 		}
 		if i.Type.Enum() != j.Type.Enum() {
 			return cmp.Compare(i.Type.Enum(), j.Type.Enum())
+		}
+		if i.Version != j.Version {
+			return cmp.Compare(i.Version, j.Version)
 		}
 		return cmp.Compare(i.Ext, j.Ext)
 	})

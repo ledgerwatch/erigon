@@ -609,9 +609,6 @@ func (r *BlockReader) blockWithSenders(ctx context.Context, tx kv.Getter, hash c
 	if err != nil {
 		return nil, nil, err
 	}
-	if !ok {
-		return
-	}
 	block = types.NewBlockFromStorage(hash, h, txs, b.Uncles, b.Withdrawals)
 	if len(senders) != block.Transactions().Len() {
 		return block, senders, nil // no senders is fine - will recover them on the fly
@@ -803,6 +800,7 @@ func (r *BlockReader) txnByID(txnID uint64, sn *Segment, buf []byte) (txn types.
 }
 
 func (r *BlockReader) txnByHash(txnHash common.Hash, segments []*Segment, buf []byte) (types.Transaction, uint64, bool, error) {
+	fmt.Printf("[dbg] txnByHash1\n")
 	for i := len(segments) - 1; i >= 0; i-- {
 		sn := segments[i]
 
@@ -898,6 +896,8 @@ func (r *BlockReader) TxnLookup(_ context.Context, tx kv.Getter, txnHash common.
 	if err != nil {
 		return 0, false, err
 	}
+
+	fmt.Printf("[dbg] txnByHash0: %t\n", n != nil)
 	if n != nil {
 		return *n, true, nil
 	}
@@ -932,7 +932,7 @@ func (r *BlockReader) IterateFrozenBodies(f func(blockNum, baseTxNum, txAmount u
 
 	for _, sn := range view.Bodies() {
 		sn := sn
-		defer sn.EnableMadvNormal().DisableReadAhead()
+		defer sn.EnableReadAhead().DisableReadAhead()
 
 		var buf []byte
 		g := sn.MakeGetter()
@@ -1128,6 +1128,9 @@ func (r *BlockReader) BorStartEventID(ctx context.Context, tx kv.Tx, hash common
 		v, err := tx.GetOne(kv.BorEventNums, hexutility.EncodeTs(blockHeight))
 		if err != nil {
 			return 0, err
+		}
+		if len(v) == 0 {
+			return 0, fmt.Errorf("BorStartEventID(%d) not found", blockHeight)
 		}
 		startEventId := binary.BigEndian.Uint64(v)
 		return startEventId, nil

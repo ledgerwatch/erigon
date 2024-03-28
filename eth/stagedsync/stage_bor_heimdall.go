@@ -6,10 +6,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sort"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/arc/v2"
+	"github.com/ledgerwatch/erigon-lib/common/dbg"
 	"github.com/ledgerwatch/log/v3"
 	"golang.org/x/sync/errgroup"
 
@@ -138,7 +140,9 @@ func BorHeimdallForward(
 				PeerID:  cfg.hd.SourcePeerId(hash),
 			}})
 			dataflow.HeaderDownloadStates.AddChange(headNumber, dataflow.HeaderInvalidated)
-			s.state.UnwindTo(unwindPoint, ForkReset(hash))
+			if err := s.state.UnwindTo(unwindPoint, ForkReset(hash), tx); err != nil {
+				return err
+			}
 			var reset uint64 = 0
 			finality.BorMilestoneRewind.Store(&reset)
 			return fmt.Errorf("verification failed for header %d: %x", headNumber, header.Hash())
@@ -220,7 +224,9 @@ func BorHeimdallForward(
 			}})
 
 			dataflow.HeaderDownloadStates.AddChange(blockNum, dataflow.HeaderInvalidated)
-			s.state.UnwindTo(blockNum-1, ForkReset(header.Hash()))
+			if err := s.state.UnwindTo(blockNum-1, ForkReset(header.Hash()), tx); err != nil {
+				return err
+			}
 			return fmt.Errorf("verification failed for header %d: %x", blockNum, header.Hash())
 		}
 
@@ -253,6 +259,7 @@ func BorHeimdallForward(
 			if err = persistValidatorSets(
 				snap,
 				u,
+				tx,
 				cfg.borConfig,
 				chain,
 				blockNum,
@@ -345,6 +352,7 @@ func loadSnapshot(
 func persistValidatorSets(
 	snap *bor.Snapshot,
 	u Unwinder,
+	chainDBTx kv.Tx,
 	config *borcfg.BorConfig,
 	chain consensus.ChainHeaderReader,
 	blockNum uint64,
@@ -412,9 +420,12 @@ func persistValidatorSets(
 
 		select {
 		case <-logEvery.C:
+			var m runtime.MemStats
+			dbg.ReadMemStats(&m)
 			logger.Info(
 				fmt.Sprintf("[%s] Gathering headers for validator proposer prorities (backwards)", logPrefix),
 				"blockNum", blockNum,
+				"alloc", common.ByteCount(m.Alloc), "sys", common.ByteCount(m.Sys),
 			)
 		default:
 		}
@@ -441,7 +452,9 @@ func persistValidatorSets(
 						break
 					}
 				}
-				u.UnwindTo(snap.Number, BadBlock(badHash, err))
+				if err := u.UnwindTo(snap.Number, BadBlock(badHash, err), chainDBTx); err != nil {
+					return err
+				}
 			} else {
 				return fmt.Errorf(
 					"snap.Apply %d, headers %d-%d: %w",

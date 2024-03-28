@@ -297,7 +297,6 @@ func BorEventsIdx(ctx context.Context, sn snaptype.FileInfo, tmpDir string, p *b
 	}
 	rs.LogLvl(log.LvlDebug)
 
-	defer d.EnableMadvNormal().DisableReadAhead()
 RETRY:
 	g.Reset(0)
 	first = true
@@ -362,7 +361,6 @@ func BorSpansIdx(ctx context.Context, sn snaptype.FileInfo, tmpDir string, p *ba
 	}
 	rs.LogLvl(log.LvlDebug)
 
-	defer d.EnableMadvNormal().DisableReadAhead()
 RETRY:
 	g := d.MakeGetter()
 	var i, offset, nextPos uint64

@@ -19,7 +19,7 @@ func TestGCReadAfterRemoveFile(t *testing.T) {
 	test := func(t *testing.T, h *History, db kv.RwDB, txs uint64) {
 		t.Helper()
 		require := require.New(t)
-		collateAndMergeHistory(t, db, h, txs)
+		collateAndMergeHistory(t, db, h, txs, true)
 
 		t.Run("read after: remove when have reader", func(t *testing.T) {
 			tx, err := db.BeginRo(ctx)
@@ -33,7 +33,7 @@ func TestGCReadAfterRemoveFile(t *testing.T) {
 			// - open new view
 			// - make sure there is no canDelete file
 			hc := h.MakeContext()
-			_ = hc
+
 			lastOnFs, _ := h.files.Max()
 			require.False(lastOnFs.frozen) // prepared dataset must have some non-frozen files. or it's bad dataset.
 			h.integrateMergedFiles(nil, []*filesItem{lastOnFs}, nil, nil)
@@ -51,12 +51,9 @@ func TestGCReadAfterRemoveFile(t *testing.T) {
 			}
 
 			require.NotNil(lastOnFs.decompressor)
-			loc := hc.ic.loc // replace of locality index must not affect current HistoryContext, but expect to be closed after last reader
-			h.localityIndex.integrateFiles(LocalityIndexFiles{}, 0, 0)
-			require.NotNil(loc.file)
+			//replace of locality index must not affect current HistoryContext, but expect to be closed after last reader
 			hc.Close()
 			require.Nil(lastOnFs.decompressor)
-			require.NotNil(loc.file)
 
 			nonDeletedOnFs, _ := h.files.Max()
 			require.False(nonDeletedOnFs.frozen)
@@ -88,11 +85,11 @@ func TestGCReadAfterRemoveFile(t *testing.T) {
 		})
 	}
 	t.Run("large_values", func(t *testing.T) {
-		_, db, h, txs := filledHistory(t, true, logger)
+		db, h, txs := filledHistory(t, true, logger)
 		test(t, h, db, txs)
 	})
 	t.Run("small_values", func(t *testing.T) {
-		_, db, h, txs := filledHistory(t, false, logger)
+		db, h, txs := filledHistory(t, false, logger)
 		test(t, h, db, txs)
 	})
 }
@@ -170,6 +167,6 @@ func TestDomainGCReadAfterRemoveFile(t *testing.T) {
 		})
 	}
 	logger := log.New()
-	_, db, d, txs := filledDomain(t, logger)
+	db, d, txs := filledDomain(t, logger)
 	test(t, d, db, txs)
 }

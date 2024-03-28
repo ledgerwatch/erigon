@@ -6,11 +6,12 @@ import (
 	"encoding/binary"
 	"fmt"
 	"runtime"
+	"slices"
 	"time"
 
+	"github.com/RoaringBitmap/roaring"
 	"github.com/ledgerwatch/erigon-lib/kv/dbutils"
 
-	"github.com/RoaringBitmap/roaring"
 	"github.com/c2h5oh/datasize"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/dbg"
@@ -19,7 +20,6 @@ import (
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/bitmapdb"
 	"github.com/ledgerwatch/log/v3"
-	"golang.org/x/exp/slices"
 
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/ethdb/cbor"

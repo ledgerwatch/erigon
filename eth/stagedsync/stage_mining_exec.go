@@ -10,6 +10,8 @@ import (
 
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/holiman/uint256"
+	"github.com/ledgerwatch/erigon-lib/kv/membatch"
+	state2 "github.com/ledgerwatch/erigon-lib/state"
 	"github.com/ledgerwatch/log/v3"
 	"golang.org/x/net/context"
 
@@ -17,14 +19,13 @@ import (
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/metrics"
 	"github.com/ledgerwatch/erigon-lib/kv"
-	"github.com/ledgerwatch/erigon-lib/kv/membatch"
+	"github.com/ledgerwatch/erigon-lib/kv/kvcfg"
 	types2 "github.com/ledgerwatch/erigon-lib/types"
 	"github.com/ledgerwatch/erigon/consensus"
 	"github.com/ledgerwatch/erigon/core"
 	"github.com/ledgerwatch/erigon/core/rawdb"
 	"github.com/ledgerwatch/erigon/core/state"
 	"github.com/ledgerwatch/erigon/core/types"
-	"github.com/ledgerwatch/erigon/core/types/accounts"
 	"github.com/ledgerwatch/erigon/core/vm"
 	"github.com/ledgerwatch/erigon/eth/stagedsync/stages"
 	"github.com/ledgerwatch/erigon/params"
@@ -77,7 +78,7 @@ func StageMiningExecCfg(
 // SpawnMiningExecStage
 // TODO:
 // - resubmitAdjustCh - variable is not implemented
-func SpawnMiningExecStage(s *StageState, tx kv.RwTx, cfg MiningExecCfg, quit <-chan struct{}, logger log.Logger) error {
+func SpawnMiningExecStage(s *StageState, tx kv.RwTx, cfg MiningExecCfg, ctx context.Context, logger log.Logger) error {
 	cfg.vmConfig.NoReceipts = false
 	chainID, _ := uint256.FromBig(cfg.chainConfig.ChainID)
 	logPrefix := s.LogPrefix()
@@ -85,9 +86,26 @@ func SpawnMiningExecStage(s *StageState, tx kv.RwTx, cfg MiningExecCfg, quit <-c
 	txs := current.PreparedTxs
 	noempty := true
 
-	stateReader := state.NewPlainStateReader(tx)
+	histV3, _ := kvcfg.HistoryV3.Enabled(tx)
+	var domains *state2.SharedDomains
+	var (
+		stateReader state.StateReader
+		stateWriter state.StateWriter
+	)
+	if histV3 {
+		var err error
+		domains, err = state2.NewSharedDomains(tx, logger)
+		if err != nil {
+			return err
+		}
+		defer domains.Close()
+		stateWriter = state.NewWriterV4(domains)
+		stateReader = state.NewReaderV4(domains)
+	} else {
+		stateReader = state.NewPlainStateReader(tx)
+		stateWriter = state.NewPlainStateWriter(tx, tx, current.Header.Number.Uint64())
+	}
 	ibs := state.New(stateReader)
-	stateWriter := state.NewPlainStateWriter(tx, tx, current.Header.Number.Uint64())
 
 	chainReader := ChainReader{Cfg: cfg.chainConfig, Db: tx, BlockReader: cfg.blockReader, Logger: logger}
 	core.InitializeBlockExecution(cfg.engine, chainReader, current.Header, &cfg.chainConfig, ibs, logger)
@@ -106,7 +124,7 @@ func SpawnMiningExecStage(s *StageState, tx kv.RwTx, cfg MiningExecCfg, quit <-c
 	// empty block is necessary to keep the liveness of the network.
 	if noempty {
 		if txs != nil && !txs.Empty() {
-			logs, _, err := addTransactionsToMiningBlock(logPrefix, current, cfg.chainConfig, cfg.vmConfig, getHeader, cfg.engine, txs, cfg.miningState.MiningConfig.Etherbase, ibs, quit, cfg.interrupt, cfg.payloadId, logger)
+			logs, _, err := addTransactionsToMiningBlock(logPrefix, current, cfg.chainConfig, cfg.vmConfig, getHeader, cfg.engine, txs, cfg.miningState.MiningConfig.Etherbase, ibs, ctx, cfg.interrupt, cfg.payloadId, logger)
 			if err != nil {
 				return err
 			}
@@ -114,24 +132,35 @@ func SpawnMiningExecStage(s *StageState, tx kv.RwTx, cfg MiningExecCfg, quit <-c
 		} else {
 
 			yielded := mapset.NewSet[[32]byte]()
-			var simulationTx kv.StatelessRwTx
-			m := membatch.NewHashBatch(tx, quit, cfg.tmpdir, logger)
-			defer m.Close()
-			simulationTx = m
-
+			var simStateReader state.StateReader
+			var simStateWriter state.StateWriter
+			if histV3 {
+				var err error
+				domains, err = state2.NewSharedDomains(tx, logger)
+				if err != nil {
+					return err
+				}
+				defer domains.Close()
+				simStateReader = state.NewReaderV4(domains)
+			} else {
+				m := membatch.NewHashBatch(tx, ctx.Done(), cfg.tmpdir, logger)
+				defer m.Close()
+				simStateReader = state.NewPlainStateReader(tx)
+				simStateWriter = state.NewPlainStateWriterNoHistory(tx)
+			}
 			executionAt, err := s.ExecutionAt(tx)
 			if err != nil {
 				return err
 			}
 
 			for {
-				txs, y, err := getNextTransactions(cfg, chainID, current.Header, 50, executionAt, simulationTx, yielded, logger)
+				txs, y, err := getNextTransactions(cfg, chainID, current.Header, 50, executionAt, yielded, simStateReader, simStateWriter, logger)
 				if err != nil {
 					return err
 				}
 
 				if !txs.Empty() {
-					logs, stop, err := addTransactionsToMiningBlock(logPrefix, current, cfg.chainConfig, cfg.vmConfig, getHeader, cfg.engine, txs, cfg.miningState.MiningConfig.Etherbase, ibs, quit, cfg.interrupt, cfg.payloadId, logger)
+					logs, stop, err := addTransactionsToMiningBlock(logPrefix, current, cfg.chainConfig, cfg.vmConfig, getHeader, cfg.engine, txs, cfg.miningState.MiningConfig.Etherbase, ibs, ctx, cfg.interrupt, cfg.payloadId, logger)
 					if err != nil {
 						return err
 					}
@@ -172,6 +201,11 @@ func SpawnMiningExecStage(s *StageState, tx kv.RwTx, cfg MiningExecCfg, quit <-c
 
 	logger.Debug("FinalizeBlockExecution", "block", current.Header.Number, "txn", current.Txs.Len(), "gas", current.Header.GasUsed, "receipt", current.Receipts.Len(), "payload", cfg.payloadId)
 
+	if histV3 {
+		if err := domains.Flush(ctx, tx); err != nil {
+			return err
+		}
+	}
 	// hack: pretend that we are real execution stage - next stages will rely on this progress
 	if err := stages.SaveStageProgress(tx, stages.Execution, current.Header.Number.Uint64()); err != nil {
 		return err
@@ -185,8 +219,9 @@ func getNextTransactions(
 	header *types.Header,
 	amount uint16,
 	executionAt uint64,
-	simulationTx kv.StatelessRwTx,
 	alreadyYielded mapset.Set[[32]byte],
+	simStateReader state.StateReader,
+	simStateWriter state.StateWriter,
 	logger log.Logger,
 ) (types.TransactionsStream, int, error) {
 	txSlots := types2.TxsRlp{}
@@ -231,7 +266,7 @@ func getNextTransactions(
 	}
 
 	blockNum := executionAt + 1
-	txs, err := filterBadTransactions(txs, cfg.chainConfig, blockNum, header.BaseFee, simulationTx, logger)
+	txs, err := filterBadTransactions(txs, cfg.chainConfig, blockNum, header.BaseFee, simStateReader, simStateWriter, logger)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -239,7 +274,7 @@ func getNextTransactions(
 	return types.NewTransactionsFixedOrder(txs), count, nil
 }
 
-func filterBadTransactions(transactions []types.Transaction, config chain.Config, blockNumber uint64, baseFee *big.Int, simulationTx kv.StatelessRwTx, logger log.Logger) ([]types.Transaction, error) {
+func filterBadTransactions(transactions []types.Transaction, config chain.Config, blockNumber uint64, baseFee *big.Int, simStateReader state.StateReader, simStateWriter state.StateWriter, logger log.Logger) ([]types.Transaction, error) {
 	initialCnt := len(transactions)
 	var filtered []types.Transaction
 	gasBailout := false
@@ -260,12 +295,11 @@ func filterBadTransactions(transactions []types.Transaction, config chain.Config
 			noSenderCnt++
 			continue
 		}
-		var account accounts.Account
-		ok, err := rawdb.ReadAccount(simulationTx, sender, &account)
+		account, err := simStateReader.ReadAccountData(sender)
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
+		if account == nil {
 			transactions = transactions[1:]
 			noAccountCnt++
 			continue
@@ -346,7 +380,7 @@ func filterBadTransactions(transactions []types.Transaction, config chain.Config
 		account.Balance.Sub(&account.Balance, want)
 		accountBuffer := make([]byte, account.EncodingLengthForStorage())
 		account.EncodeForStorage(accountBuffer)
-		if err := simulationTx.Put(kv.PlainState, sender[:], accountBuffer); err != nil {
+		if err := simStateWriter.UpdateAccountData(sender, account, nil); err != nil {
 			return nil, err
 		}
 		// Mark transaction as valid
@@ -358,7 +392,7 @@ func filterBadTransactions(transactions []types.Transaction, config chain.Config
 }
 
 func addTransactionsToMiningBlock(logPrefix string, current *MiningBlock, chainConfig chain.Config, vmConfig *vm.Config, getHeader func(hash libcommon.Hash, number uint64) *types.Header,
-	engine consensus.Engine, txs types.TransactionsStream, coinbase libcommon.Address, ibs *state.IntraBlockState, quit <-chan struct{},
+	engine consensus.Engine, txs types.TransactionsStream, coinbase libcommon.Address, ibs *state.IntraBlockState, ctx context.Context,
 	interrupt *int32, payloadId uint64, logger log.Logger) (types.Logs, bool, error) {
 	header := current.Header
 	tcount := 0
@@ -409,7 +443,7 @@ LOOP:
 			}
 		}
 
-		if err := libcommon.Stopped(quit); err != nil {
+		if err := libcommon.Stopped(ctx.Done()); err != nil {
 			return nil, true, err
 		}
 
