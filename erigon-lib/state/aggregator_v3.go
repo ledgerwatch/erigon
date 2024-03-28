@@ -17,10 +17,13 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/c2h5oh/datasize"
+	"github.com/ledgerwatch/erigon-lib/seg"
 	math2 "math"
 	"os"
 	"path/filepath"
@@ -77,6 +80,8 @@ type AggregatorV3 struct {
 	collateAndBuildWorkers int // minimize amount of background workers by default
 	mergeWorkers           int // usually 1
 
+	commitmentValuesTransform bool
+
 	// To keep DB small - need move data to small files ASAP.
 	// It means goroutine which creating small files - can't be locked by merge or indexing.
 	buildingFiles           atomic.Bool
@@ -104,6 +109,8 @@ type AggregatorV3 struct {
 
 type OnFreezeFunc func(frozenFileNames []string)
 
+const AggregatorV3SqueezeCommitmentValues = true
+
 func NewAggregatorV3(ctx context.Context, dirs datadir.Dirs, aggregationStep uint64, db kv.RoDB, logger log.Logger) (*AggregatorV3, error) {
 	tmpdir := dirs.Tmp
 	salt, err := getStateIndicesSalt(dirs.Snap)
@@ -126,12 +133,15 @@ func NewAggregatorV3(ctx context.Context, dirs datadir.Dirs, aggregationStep uin
 		logger:                 logger,
 		collateAndBuildWorkers: 1,
 		mergeWorkers:           1,
+
+		commitmentValuesTransform: AggregatorV3SqueezeCommitmentValues,
 	}
 	cfg := domainCfg{
 		hist: histCfg{
 			iiCfg:             iiCfg{salt: salt, dirs: dirs, db: db},
 			withLocalityIndex: false, withExistenceIndex: false, compression: CompressNone, historyLargeValues: false,
 		},
+		restrictSubsetFileDeletions: a.commitmentValuesTransform,
 	}
 	if a.d[kv.AccountsDomain], err = NewDomain(cfg, aggregationStep, "accounts", kv.TblAccountKeys, kv.TblAccountVals, kv.TblAccountHistoryKeys, kv.TblAccountHistoryVals, kv.TblAccountIdx, logger); err != nil {
 		return nil, err
@@ -141,6 +151,7 @@ func NewAggregatorV3(ctx context.Context, dirs datadir.Dirs, aggregationStep uin
 			iiCfg:             iiCfg{salt: salt, dirs: dirs, db: db},
 			withLocalityIndex: false, withExistenceIndex: false, compression: CompressNone, historyLargeValues: false,
 		},
+		restrictSubsetFileDeletions: a.commitmentValuesTransform,
 	}
 	if a.d[kv.StorageDomain], err = NewDomain(cfg, aggregationStep, "storage", kv.TblStorageKeys, kv.TblStorageVals, kv.TblStorageHistoryKeys, kv.TblStorageHistoryVals, kv.TblStorageIdx, logger); err != nil {
 		return nil, err
@@ -158,9 +169,11 @@ func NewAggregatorV3(ctx context.Context, dirs datadir.Dirs, aggregationStep uin
 		hist: histCfg{
 			iiCfg:             iiCfg{salt: salt, dirs: dirs, db: db},
 			withLocalityIndex: false, withExistenceIndex: false, compression: CompressNone, historyLargeValues: false,
-			dontProduceFiles: true,
+			dontProduceHistoryFiles: true,
 		},
-		compress: CompressNone,
+		replaceKeysInValues:         a.commitmentValuesTransform,
+		restrictSubsetFileDeletions: a.commitmentValuesTransform,
+		compress:                    CompressNone,
 	}
 	if a.d[kv.CommitmentDomain], err = NewDomain(cfg, aggregationStep, "commitment", kv.TblCommitmentKeys, kv.TblCommitmentVals, kv.TblCommitmentHistoryKeys, kv.TblCommitmentHistoryVals, kv.TblCommitmentIdx, logger); err != nil {
 		return nil, err
@@ -1243,6 +1256,162 @@ func (mf MergedFilesV3) Close() {
 	}
 }
 
+// SqueezeCommitmentFiles should be called only when NO EXECUTION is running.
+// Removes commitment files and suppose following aggregator shutdown and restart  (to integrate new files and rebuild indexes)
+func (ac *AggregatorV3Context) SqueezeCommitmentFiles() error {
+	if !ac.a.commitmentValuesTransform {
+		return nil
+	}
+
+	commitment := ac.d[kv.CommitmentDomain]
+	accounts := ac.d[kv.AccountsDomain]
+	storage := ac.d[kv.StorageDomain]
+
+	// oh, again accessing domain.files directly, again and again..
+	accountFiles := accounts.d.files.Items()
+	storageFiles := storage.d.files.Items()
+	commitFiles := commitment.d.files.Items()
+
+	getSizeDelta := func(a, b string) (datasize.ByteSize, float32, error) {
+		ai, err := os.Stat(a)
+		if err != nil {
+			return 0, 0, err
+		}
+		bi, err := os.Stat(b)
+		if err != nil {
+			return 0, 0, err
+		}
+		return datasize.ByteSize(ai.Size()) - datasize.ByteSize(bi.Size()), 100.0 * (float32(ai.Size()-bi.Size()) / float32(ai.Size())), nil
+	}
+
+	var (
+		obsoleteFiles  []string
+		temporalFiles  []string
+		processedFiles int
+		ai, si         int
+		sizeDelta      = datasize.B
+		sqExt          = ".squeezed"
+	)
+
+	for ci := 0; ci < len(commitFiles); ci++ {
+		cf := commitFiles[ci]
+		for ai = 0; ai < len(accountFiles); ai++ {
+			if accountFiles[ai].startTxNum == cf.startTxNum && accountFiles[ai].endTxNum == cf.endTxNum {
+				break
+			}
+		}
+		for si = 0; si < len(storageFiles); si++ {
+			if storageFiles[si].startTxNum == cf.startTxNum && storageFiles[si].endTxNum == cf.endTxNum {
+				break
+			}
+		}
+		if ai == len(accountFiles) || si == len(storageFiles) {
+			log.Info("SqueezeCommitmentFiles: commitment file has no corresponding account or storage file", "commitment", cf.decompressor.FileName())
+			continue
+		}
+		af, sf := accountFiles[ai], storageFiles[si]
+
+		err := func() error {
+			log.Info("SqueezeCommitmentFiles: file start", "original", cf.decompressor.FileName(),
+				"progress", fmt.Sprintf("%d/%d", ci+1, len(accountFiles)))
+
+			originalPath := cf.decompressor.FilePath()
+			squeezedTmpPath := originalPath + sqExt + ".tmp"
+			squeezedCompr, err := seg.NewCompressor(context.Background(), "squeeze", squeezedTmpPath, ac.a.dirs.Tmp,
+				seg.MinPatternScore, commitment.d.compressWorkers, log.LvlTrace, commitment.d.logger)
+
+			if err != nil {
+				return err
+			}
+			defer squeezedCompr.Close()
+
+			reader := NewArchiveGetter(cf.decompressor.MakeGetter(), commitment.d.compression)
+			reader.Reset(0)
+
+			writer := NewArchiveWriter(squeezedCompr, commitment.d.compression)
+			vt := commitment.commitmentValTransformDomain(accounts, storage, af, sf)
+
+			for reader.HasNext() {
+				k, _ := reader.Next(nil)
+				v, _ := reader.Next(nil)
+
+				if k == nil {
+					// nil keys are not supported for domains
+					continue
+				}
+
+				if !bytes.Equal(k, keyCommitmentState) {
+					v, err = vt(v, af.startTxNum, af.endTxNum)
+					if err != nil {
+						return fmt.Errorf("failed to transform commitment value: %w", err)
+					}
+				}
+				if err = writer.AddWord(k); err != nil {
+					return fmt.Errorf("write key word: %w", err)
+				}
+				if err = writer.AddWord(v); err != nil {
+					return fmt.Errorf("write value word: %w", err)
+				}
+			}
+
+			if err = writer.Compress(); err != nil {
+				return err
+			}
+			writer.Close()
+
+			squeezedPath := originalPath + sqExt
+			if err = os.Rename(squeezedTmpPath, squeezedPath); err != nil {
+				return err
+			}
+			temporalFiles = append(temporalFiles, squeezedPath)
+
+			delta, deltaP, err := getSizeDelta(originalPath, squeezedPath)
+			if err != nil {
+				return err
+			}
+			sizeDelta += delta
+
+			log.Info("SqueezeCommitmentFiles: file done", "original", filepath.Base(originalPath),
+				"sizeDelta", fmt.Sprintf("%s (%.1f%%)", delta.HR(), deltaP))
+
+			fromStep, toStep := af.startTxNum/ac.a.StepSize(), af.endTxNum/ac.a.StepSize()
+
+			// need to remove all indexes for commitment file as well
+			obsoleteFiles = append(obsoleteFiles,
+				originalPath,
+				commitment.d.kvBtFilePath(fromStep, toStep),
+				commitment.d.kvAccessorFilePath(fromStep, toStep),
+				commitment.d.kvExistenceIdxFilePath(fromStep, toStep),
+			)
+			processedFiles++
+			return nil
+		}()
+		if err != nil {
+			return fmt.Errorf("failed to squeeze commitment file %q: %w", cf.decompressor.FileName(), err)
+		}
+	}
+
+	log.Info("SqueezeCommitmentFiles: squeezed files has been produced, removing obsolete files",
+		"toRemove", len(obsoleteFiles), "processed", fmt.Sprintf("%d/%d", processedFiles, len(commitFiles)))
+	for _, path := range obsoleteFiles {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		log.Debug("SqueezeCommitmentFiles: obsolete file removal", "path", path)
+	}
+	log.Info("SqueezeCommitmentFiles: indices removed, renaming temporal files ")
+
+	for _, path := range temporalFiles {
+		if err := os.Rename(path, strings.TrimSuffix(path, sqExt)); err != nil {
+			return err
+		}
+		log.Debug("SqueezeCommitmentFiles: temporal file renaming", "path", path)
+	}
+	log.Info("SqueezeCommitmentFiles: done", "sizeDelta", sizeDelta.HR(), "files", len(accountFiles))
+
+	return nil
+}
+
 func (ac *AggregatorV3Context) mergeFiles(ctx context.Context, files SelectedStaticFilesV3, r RangesV3) (MergedFilesV3, error) {
 	var mf MergedFilesV3
 	g, ctx := errgroup.WithContext(ctx)
@@ -1255,11 +1424,41 @@ func (ac *AggregatorV3Context) mergeFiles(ctx context.Context, files SelectedSta
 	}()
 
 	ac.a.logger.Info(fmt.Sprintf("[snapshots] merge state %s", r.String()))
+
+	accStorageMerged := new(sync.WaitGroup)
+
 	for id := range ac.d {
 		id := id
 		if r.d[id].any() {
+			kid := kv.Domain(id)
+			if ac.a.commitmentValuesTransform && (kid == kv.AccountsDomain || kid == kv.StorageDomain) {
+				accStorageMerged.Add(1)
+			}
+
 			g.Go(func() (err error) {
-				mf.d[id], mf.dIdx[id], mf.dHist[id], err = ac.d[id].mergeFiles(ctx, files.d[id], files.dIdx[id], files.dHist[id], r.d[id], ac.a.ps)
+				var vt valueTransformer
+				if ac.a.commitmentValuesTransform && kid == kv.CommitmentDomain {
+					ac.a.d[kv.AccountsDomain].restrictSubsetFileDeletions = true
+					ac.a.d[kv.StorageDomain].restrictSubsetFileDeletions = true
+					ac.a.d[kv.CommitmentDomain].restrictSubsetFileDeletions = true
+
+					accStorageMerged.Wait()
+
+					vt = ac.d[kv.CommitmentDomain].commitmentValTransformDomain(ac.d[kv.AccountsDomain], ac.d[kv.StorageDomain],
+						mf.d[kv.AccountsDomain], mf.d[kv.StorageDomain])
+				}
+
+				mf.d[id], mf.dIdx[id], mf.dHist[id], err = ac.d[id].mergeFiles(ctx, files.d[id], files.dIdx[id], files.dHist[id], r.d[id], vt, ac.a.ps)
+				if ac.a.commitmentValuesTransform {
+					if kid == kv.AccountsDomain || kid == kv.StorageDomain {
+						accStorageMerged.Done()
+					}
+					if err == nil && kid == kv.CommitmentDomain {
+						ac.a.d[kv.AccountsDomain].restrictSubsetFileDeletions = false
+						ac.a.d[kv.StorageDomain].restrictSubsetFileDeletions = false
+						ac.a.d[kv.CommitmentDomain].restrictSubsetFileDeletions = false
+					}
+				}
 				return err
 			})
 		}
@@ -1296,8 +1495,10 @@ func (ac *AggregatorV3Context) mergeFiles(ctx context.Context, files SelectedSta
 	err := g.Wait()
 	if err == nil {
 		closeFiles = false
+		ac.a.logger.Info(fmt.Sprintf("[snapshots] state merge done %s", r.String()))
+	} else {
+		ac.a.logger.Warn(fmt.Sprintf("[snapshots] state merge failed err=%v %s", err, r.String()))
 	}
-	ac.a.logger.Info(fmt.Sprintf("[snapshots] state merge done %s", r.String()))
 	return mf, err
 }
 
@@ -1310,6 +1511,7 @@ func (ac *AggregatorV3Context) integrateMergedFiles(outs SelectedStaticFilesV3, 
 	for id, d := range ac.a.d {
 		d.integrateMergedFiles(outs.d[id], outs.dIdx[id], outs.dHist[id], in.d[id], in.dIdx[id], in.dHist[id])
 	}
+
 	ac.a.logAddrs.integrateMergedFiles(outs.logAddrs, in.logAddrs)
 	ac.a.logTopics.integrateMergedFiles(outs.logTopics, in.logTopics)
 	ac.a.tracesFrom.integrateMergedFiles(outs.tracesFrom, in.tracesFrom)
