@@ -23,6 +23,7 @@ import (
 	"github.com/ledgerwatch/erigon/core/rawdb"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/eth/ethconfig"
+	bor_types "github.com/ledgerwatch/erigon/polygon/bor/types"
 	"github.com/ledgerwatch/erigon/polygon/heimdall"
 	"github.com/ledgerwatch/erigon/rlp"
 	"github.com/ledgerwatch/erigon/turbo/services"
@@ -101,6 +102,7 @@ func (r *RemoteBlockReader) HeaderByNumber(ctx context.Context, tx kv.Getter, bl
 }
 func (r *RemoteBlockReader) Snapshots() services.BlockSnapshots    { panic("not implemented") }
 func (r *RemoteBlockReader) BorSnapshots() services.BlockSnapshots { panic("not implemented") }
+func (r *RemoteBlockReader) AllTypes() []snaptype.Type             { panic("not implemented") }
 func (r *RemoteBlockReader) FrozenBlocks() uint64                  { panic("not supported") }
 func (r *RemoteBlockReader) FrozenBorBlocks() uint64               { panic("not supported") }
 func (r *RemoteBlockReader) FrozenFiles() (list []string)          { panic("not supported") }
@@ -248,7 +250,7 @@ func (r *RemoteBlockReader) EventLookup(ctx context.Context, tx kv.Getter, txnHa
 }
 
 func (r *RemoteBlockReader) EventsByBlock(ctx context.Context, tx kv.Tx, hash common.Hash, blockHeight uint64) ([]rlp.RawValue, error) {
-	borTxnHash := types.ComputeBorTxHash(blockHeight, hash)
+	borTxnHash := bor_types.ComputeBorTxHash(blockHeight, hash)
 	reply, err := r.client.BorEvent(ctx, &remote.BorEventRequest{BorTxHash: gointerfaces.ConvertHashToH256(borTxnHash)})
 	if err != nil {
 		return nil, err
@@ -317,6 +319,15 @@ func (r *BlockReader) BorSnapshots() services.BlockSnapshots {
 	}
 
 	return nil
+}
+
+func (r *BlockReader) AllTypes() []snaptype.Type {
+	var types []snaptype.Type
+	types = append(types, r.sn.Types()...)
+	if r.borSn != nil {
+		types = append(types, r.borSn.Types()...)
+	}
+	return types
 }
 
 func (r *BlockReader) FrozenBlocks() uint64 { return r.sn.BlocksAvailable() }
@@ -1133,7 +1144,7 @@ func (r *BlockReader) BorStartEventID(ctx context.Context, tx kv.Tx, hash common
 		return startEventId, nil
 	}
 
-	borTxHash := types.ComputeBorTxHash(blockHeight, hash)
+	borTxHash := bor_types.ComputeBorTxHash(blockHeight, hash)
 	view := r.borSn.View()
 	defer view.Close()
 
@@ -1211,7 +1222,7 @@ func (r *BlockReader) EventsByBlock(ctx context.Context, tx kv.Tx, hash common.H
 		}
 		return result, nil
 	}
-	borTxHash := types.ComputeBorTxHash(blockHeight, hash)
+	borTxHash := bor_types.ComputeBorTxHash(blockHeight, hash)
 	view := r.borSn.View()
 	defer view.Close()
 	segments := view.Events()

@@ -53,6 +53,7 @@ type BorHeimdallCfg struct {
 	loopBreakCheck   func(int) bool
 	recents          *lru.ARCCache[libcommon.Hash, *bor.Snapshot]
 	signatures       *lru.ARCCache[libcommon.Hash, libcommon.Address]
+	recordWaypoints  bool
 }
 
 func StageBorHeimdallCfg(
@@ -67,6 +68,7 @@ func StageBorHeimdallCfg(
 	loopBreakCheck func(int) bool,
 	recents *lru.ARCCache[libcommon.Hash, *bor.Snapshot],
 	signatures *lru.ARCCache[libcommon.Hash, libcommon.Address],
+	recordWaypoints bool,
 ) BorHeimdallCfg {
 	var borConfig *borcfg.BorConfig
 	if chainConfig.Bor != nil {
@@ -87,6 +89,7 @@ func StageBorHeimdallCfg(
 		loopBreakCheck:   loopBreakCheck,
 		recents:          recents,
 		signatures:       signatures,
+		recordWaypoints:  recordWaypoints,
 	}
 }
 
@@ -166,10 +169,28 @@ func BorHeimdallForward(
 
 	var blockNum uint64
 	var fetchTime time.Duration
+	var snapTime time.Duration
+	var snapInitTime time.Duration
+
 	var eventRecords int
+
 	lastSpanID, err := fetchRequiredHeimdallSpansIfNeeded(ctx, headNumber, tx, cfg, s.LogPrefix(), logger)
 	if err != nil {
 		return err
+	}
+
+	var lastCheckpointId, lastMilestoneId uint64
+
+	if cfg.recordWaypoints {
+		lastCheckpointId, err = fetchAndWriteHeimdallCheckpointsIfNeeded(ctx, headNumber, tx, cfg, s.LogPrefix(), logger)
+		if err != nil {
+			return err
+		}
+
+		lastMilestoneId, err = fetchAndWriteHeimdallMilestonesIfNeeded(ctx, headNumber, tx, cfg, s.LogPrefix(), logger)
+		if err != nil {
+			return err
+		}
 	}
 
 	lastStateSyncEventID, _, err := cfg.blockReader.LastEventId(ctx, tx)
@@ -182,6 +203,9 @@ func BorHeimdallForward(
 	defer logTimer.Stop()
 
 	logger.Info(fmt.Sprintf("[%s] Processing sync events...", s.LogPrefix()), "from", lastBlockNum+1, "to", headNumber)
+
+	var nextEventRecord *heimdall.EventRecordWithTime
+
 	for blockNum = lastBlockNum + 1; blockNum <= headNumber; blockNum++ {
 		select {
 		default:
@@ -190,9 +214,13 @@ func BorHeimdallForward(
 				fmt.Sprintf("[%s] StateSync Progress", s.LogPrefix()),
 				"progress", blockNum,
 				"lastSpanID", lastSpanID,
+				"lastCheckpointId", lastCheckpointId,
+				"lastMilestoneId", lastMilestoneId,
 				"lastStateSyncEventID", lastStateSyncEventID,
 				"total records", eventRecords,
-				"fetch time", fetchTime,
+				"sync-events", fetchTime,
+				"snaps", snapTime,
+				"snap-init", snapInitTime,
 				"process time", time.Since(processStart),
 			)
 		}
@@ -224,13 +252,25 @@ func BorHeimdallForward(
 			return fmt.Errorf("verification failed for header %d: %x", blockNum, header.Hash())
 		}
 
+		snapStart := time.Now()
+
 		if cfg.blockReader.BorSnapshots().SegmentsMin() == 0 {
+			snapTime = snapTime + time.Since(snapStart)
 			// SegmentsMin is only set if running as an uploader process (check SnapshotsCfg.snapshotUploader and
 			// UploadLocationFlag) when we remove snapshots based on FrozenBlockLimit and number of uploaded snapshots
 			// avoid calling this if block for blockNums <= SegmentsMin to avoid reinsertion of snapshots
 			snap := loadSnapshot(blockNum, header.Hash(), cfg.borConfig, recents, signatures, cfg.snapDb, logger)
 
-			if snap == nil {
+			lastPersistedBlockNum, err := lastPersistedSnapshotBlock(ctx, cfg.snapDb)
+
+			if err != nil {
+				return err
+			}
+
+			// if the last time we persisted snapshots is too far away re-run the forward
+			// initialization process - this is to avoid memory growth due to recusrion
+			// in persistValidatorSets
+			if snap == nil && blockNum-lastPersistedBlockNum > (snapshotPersistInterval*5) {
 				snap, err = initValidatorSets(
 					ctx,
 					tx,
@@ -239,6 +279,7 @@ func BorHeimdallForward(
 					cfg.heimdallClient,
 					chain,
 					blockNum,
+					lastPersistedBlockNum,
 					recents,
 					signatures,
 					cfg.snapDb,
@@ -249,6 +290,8 @@ func BorHeimdallForward(
 					return fmt.Errorf("can't initialise validator sets: %w", err)
 				}
 			}
+
+			snapInitTime = snapInitTime + time.Since(snapStart)
 
 			if err = persistValidatorSets(
 				snap,
@@ -271,22 +314,38 @@ func BorHeimdallForward(
 			return err
 		}
 
+		snapTime = snapTime + time.Since(snapStart)
+
 		var callTime time.Duration
-		var records int
-		lastStateSyncEventID, records, callTime, err = fetchRequiredHeimdallStateSyncEventsIfNeeded(
-			ctx,
-			header,
-			tx,
-			cfg,
-			s.LogPrefix(),
-			logger,
-			lastStateSyncEventID,
-		)
-		if err != nil {
-			return err
+
+		if nextEventRecord == nil || header.Time > uint64(nextEventRecord.Time.Unix()) {
+			var records int
+			lastStateSyncEventID, records, callTime, err = fetchRequiredHeimdallStateSyncEventsIfNeeded(
+				ctx,
+				header,
+				tx,
+				cfg,
+				s.LogPrefix(),
+				logger,
+				lastStateSyncEventID,
+			)
+
+			if err != nil {
+				return err
+			}
+
+			if records != 0 {
+				nextEventRecord = nil
+				eventRecords += records
+			} else {
+				if nextEventRecord == nil || nextEventRecord.ID <= lastStateSyncEventID {
+					if eventRecord, err := cfg.heimdallClient.FetchStateSyncEvent(ctx, lastStateSyncEventID+1); err == nil {
+						nextEventRecord = eventRecord
+					}
+				}
+			}
 		}
 
-		eventRecords += records
 		fetchTime += callTime
 
 		if cfg.loopBreakCheck != nil && cfg.loopBreakCheck(int(blockNum-lastBlockNum)) {
@@ -312,6 +371,7 @@ func BorHeimdallForward(
 		"lastStateSyncEventID", lastStateSyncEventID,
 		"total records", eventRecords,
 		"fetch time", fetchTime,
+		"snap time", snapTime,
 		"process time", time.Since(processStart),
 	)
 
@@ -367,6 +427,9 @@ func persistValidatorSets(
 		snap = s
 	}
 
+	count := 0
+	dbsize := uint64(0)
+
 	//nolint:govet
 	for snap == nil {
 		// If an on-disk snapshot can be found, use that
@@ -412,12 +475,23 @@ func persistValidatorSets(
 
 		select {
 		case <-logEvery.C:
+			if dbsize == 0 {
+				_ = snapDb.View(context.Background(), func(tx kv.Tx) error {
+					if cursor, err := tx.Cursor(kv.BorSeparate); err == nil {
+						dbsize, _ = cursor.Count()
+						cursor.Close()
+					}
+					return nil
+				})
+			}
 			logger.Info(
 				fmt.Sprintf("[%s] Gathering headers for validator proposer prorities (backwards)", logPrefix),
-				"blockNum", blockNum,
+				"processed", count, "blockNum", blockNum, "dbsize", dbsize,
 			)
 		default:
 		}
+
+		count++
 	}
 
 	// check if snapshot is nil
@@ -472,6 +546,25 @@ func persistValidatorSets(
 	return nil
 }
 
+func lastPersistedSnapshotBlock(ctx context.Context, snapDb kv.RwDB) (uint64, error) {
+	var lastPersistedBlockNum uint64
+
+	err := snapDb.View(context.Background(), func(tx kv.Tx) error {
+		progressBytes, err := tx.GetOne(kv.BorSeparate, []byte("bor-snapshot-progress"))
+		if err != nil {
+			return err
+		}
+
+		if len(progressBytes) == 8 {
+			lastPersistedBlockNum = binary.BigEndian.Uint64(progressBytes)
+		}
+
+		return nil
+	})
+
+	return lastPersistedBlockNum, err
+}
+
 func initValidatorSets(
 	ctx context.Context,
 	tx kv.RwTx,
@@ -480,6 +573,7 @@ func initValidatorSets(
 	heimdallClient heimdall.HeimdallClient,
 	chain consensus.ChainHeaderReader,
 	blockNum uint64,
+	lastPersistedBlockNum uint64,
 	recents *lru.ARCCache[libcommon.Hash, *bor.Snapshot],
 	signatures *lru.ARCCache[libcommon.Hash, libcommon.Address],
 	snapDb kv.RwDB,
@@ -492,90 +586,125 @@ func initValidatorSets(
 
 	var snap *bor.Snapshot
 
-	// Special handling of the headers in the snapshot
-	zeroHeader := chain.GetHeaderByNumber(0)
-	if zeroHeader != nil {
-		// get checkpoint data
-		hash := zeroHeader.Hash()
+	var parentHeader *types.Header
+	var firstBlockNum uint64
 
-		if zeroSnap := loadSnapshot(0, hash, config, recents, signatures, snapDb, logger); zeroSnap != nil {
-			return nil, nil
-		}
+	if lastPersistedBlockNum > 0 {
+		parentHeader = chain.GetHeaderByNumber(lastPersistedBlockNum)
+		snap = loadSnapshot(lastPersistedBlockNum, parentHeader.Hash(), config, recents, signatures, snapDb, logger)
+		firstBlockNum = lastPersistedBlockNum + 1
+	} else {
+		// Special handling of the headers in the snapshot
+		zeroHeader := chain.GetHeaderByNumber(0)
 
-		// get validators and current span
-		zeroSpanBytes, err := blockReader.Span(ctx, tx, 0)
+		if zeroHeader != nil {
+			// get checkpoint data
+			hash := zeroHeader.Hash()
 
-		if err != nil {
-			if _, err := fetchAndWriteHeimdallSpan(ctx, 0, tx, heimdallClient, logPrefix, logger); err != nil {
-				return nil, err
-			}
+			if snap = loadSnapshot(0, hash, config, recents, signatures, snapDb, logger); snap == nil {
+				// get validators and current span
+				zeroSpanBytes, err := blockReader.Span(ctx, tx, 0)
 
-			zeroSpanBytes, err = blockReader.Span(ctx, tx, 0)
-
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		if zeroSpanBytes == nil {
-			return nil, fmt.Errorf("zero span not found")
-		}
-
-		var zeroSpan heimdall.Span
-		if err = json.Unmarshal(zeroSpanBytes, &zeroSpan); err != nil {
-			return nil, err
-		}
-
-		// new snap shot
-		snap = bor.NewSnapshot(config, signatures, 0, hash, zeroSpan.ValidatorSet.Validators, logger)
-		if err := snap.Store(snapDb); err != nil {
-			return nil, fmt.Errorf("snap.Store (0): %w", err)
-		}
-		logger.Debug(fmt.Sprintf("[%s] Stored proposer snapshot to disk", logPrefix), "number", 0, "hash", hash)
-		g := errgroup.Group{}
-		g.SetLimit(estimate.AlmostAllCPUs())
-		defer func() {
-			_ = g.Wait() // goroutines used in this err group do not return err (check below)
-		}()
-
-		batchSize := 128 // must be < InMemorySignatures
-		initialHeaders := make([]*types.Header, 0, batchSize)
-		parentHeader := zeroHeader
-		for i := uint64(1); i <= blockNum; i++ {
-			header := chain.GetHeaderByNumber(i)
-			{
-				// `snap.apply` bottleneck - is recover of signer.
-				// to speedup: recover signer in background goroutines and save in `sigcache`
-				// `batchSize` < `InMemorySignatures`: means all current batch will fit in cache - and
-				// `snap.apply` will find it there.
-				g.Go(func() error {
-					if header == nil {
-						return nil
+				if err != nil {
+					if _, err := fetchAndWriteHeimdallSpan(ctx, 0, tx, heimdallClient, logPrefix, logger); err != nil {
+						return nil, err
 					}
-					_, _ = bor.Ecrecover(header, signatures, config)
-					return nil
-				})
-			}
-			if header == nil {
-				return nil, fmt.Errorf("missing header persisting validator sets: (inside loop at %d)", i)
-			}
-			initialHeaders = append(initialHeaders, header)
-			if len(initialHeaders) == cap(initialHeaders) {
-				if snap, err = snap.Apply(parentHeader, initialHeaders, logger); err != nil {
-					return nil, fmt.Errorf("snap.Apply (inside loop): %w", err)
+
+					zeroSpanBytes, err = blockReader.Span(ctx, tx, 0)
+
+					if err != nil {
+						return nil, err
+					}
 				}
-				parentHeader = initialHeaders[len(initialHeaders)-1]
-				initialHeaders = initialHeaders[:0]
+
+				if zeroSpanBytes == nil {
+					return nil, fmt.Errorf("zero span not found")
+				}
+
+				var zeroSpan heimdall.Span
+				if err = json.Unmarshal(zeroSpanBytes, &zeroSpan); err != nil {
+					return nil, err
+				}
+
+				// new snap shot
+				snap = bor.NewSnapshot(config, signatures, 0, hash, zeroSpan.ValidatorSet.Validators, logger)
+				if err := snap.Store(snapDb); err != nil {
+					return nil, fmt.Errorf("snap.Store (0): %w", err)
+				}
+				logger.Debug(fmt.Sprintf("[%s] Stored proposer snapshot to disk", logPrefix), "number", 0, "hash", hash)
 			}
-			select {
-			case <-logEvery.C:
-				logger.Info(fmt.Sprintf("[%s] Computing validator proposer prorities (forward)", logPrefix), "blockNum", i)
-			default:
+
+			parentHeader = zeroHeader
+			firstBlockNum = 1
+			lastPersistedBlockNum = 0
+		}
+	}
+
+	g := errgroup.Group{}
+	g.SetLimit(estimate.AlmostAllCPUs())
+	defer func() {
+		_ = g.Wait() // goroutines used in this err group do not return err (check below)
+	}()
+
+	batchSize := 128 // must be < InMemorySignatures
+	initialHeaders := make([]*types.Header, 0, batchSize)
+
+	var err error
+
+	for i := uint64(firstBlockNum); i <= blockNum; i++ {
+		header := chain.GetHeaderByNumber(i)
+		{
+			// `snap.apply` bottleneck - is recover of signer.
+			// to speedup: recover signer in background goroutines and save in `sigcache`
+			// `batchSize` < `InMemorySignatures`: means all current batch will fit in cache - and
+			// `snap.apply` will find it there.
+			g.Go(func() error {
+				if header == nil {
+					return nil
+				}
+				_, _ = bor.Ecrecover(header, signatures, config)
+				return nil
+			})
+		}
+		if header == nil {
+			return nil, fmt.Errorf("missing header persisting validator sets: (inside loop at %d)", i)
+		}
+		initialHeaders = append(initialHeaders, header)
+
+		if len(initialHeaders) == cap(initialHeaders) {
+
+			if snap, err = snap.Apply(parentHeader, initialHeaders, logger); err != nil {
+				return nil, fmt.Errorf("snap.Apply (inside loop): %w", err)
+			}
+
+			parentHeader = initialHeaders[len(initialHeaders)-1]
+			initialHeaders = initialHeaders[:0]
+
+			// If we've generated a new persistent snapshot, save to disk
+			if snap.Number%snapshotPersistInterval == 0 {
+				if err := snap.Store(snapDb); err != nil {
+					return nil, fmt.Errorf("snap.Store: %w", err)
+				}
+
+				lastPersistedBlockNum = snap.Number
+
+				logger.Trace(
+					fmt.Sprintf("[%s] Stored proposer snapshot to disk", logPrefix),
+					"number", snap.Number,
+					"hash", snap.Hash,
+				)
 			}
 		}
-		if snap, err = snap.Apply(parentHeader, initialHeaders, logger); err != nil {
-			return nil, fmt.Errorf("snap.Apply (outside loop): %w", err)
+
+		select {
+		case <-logEvery.C:
+			logger.Info(fmt.Sprintf("[%s] Computing validator proposer prorities (forward)", logPrefix), "to", blockNum, "snapNum", i, "persisted", lastPersistedBlockNum)
+		default:
 		}
+	}
+
+	if snap, err = snap.Apply(parentHeader, initialHeaders, logger); err != nil {
+		return nil, fmt.Errorf("snap.Apply (outside loop): %w", err)
 	}
 
 	return snap, nil

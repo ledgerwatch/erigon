@@ -40,6 +40,7 @@ const (
 //go:generate mockgen -destination=./client_mock.go -package=heimdall . HeimdallClient
 type HeimdallClient interface {
 	FetchStateSyncEvents(ctx context.Context, fromId uint64, to time.Time, limit int) ([]*EventRecordWithTime, error)
+	FetchStateSyncEvent(ctx context.Context, id uint64) (*EventRecordWithTime, error)
 
 	FetchLatestSpan(ctx context.Context) (*Span, error)
 	FetchSpan(ctx context.Context, spanID uint64) (*Span, error)
@@ -105,6 +106,7 @@ func newHeimdallClient(urlString string, httpClient HttpClient, retryBackOff tim
 const (
 	fetchStateSyncEventsFormat = "from-id=%d&to-time=%d&limit=%d"
 	fetchStateSyncEventsPath   = "clerk/event-record/list"
+	fetchStateSyncEvent        = "clerk/event-record/%s"
 
 	fetchCheckpoint      = "/checkpoints/%s"
 	fetchCheckpointCount = "/checkpoints/count"
@@ -127,12 +129,12 @@ func (c *Client) FetchStateSyncEvents(ctx context.Context, fromID uint64, to tim
 	eventRecords := make([]*EventRecordWithTime, 0)
 
 	for {
-		url, err := stateSyncURL(c.urlString, fromID, to.Unix())
+		url, err := stateSyncListURL(c.urlString, fromID, to.Unix())
 		if err != nil {
 			return nil, err
 		}
 
-		c.logger.Debug("[bor.heimdall] Fetching state sync events", "queryParams", url.RawQuery)
+		c.logger.Trace("[bor.heimdall] Fetching state sync events", "queryParams", url.RawQuery)
 
 		ctx = withRequestType(ctx, stateSyncRequest)
 
@@ -168,6 +170,24 @@ func (c *Client) FetchStateSyncEvents(ctx context.Context, fromID uint64, to tim
 	})
 
 	return eventRecords, nil
+}
+
+func (c *Client) FetchStateSyncEvent(ctx context.Context, id uint64) (*EventRecordWithTime, error) {
+	url, err := stateSyncURL(c.urlString, id)
+
+	if err != nil {
+		return nil, err
+	}
+
+	ctx = withRequestType(ctx, stateSyncRequest)
+
+	response, err := FetchWithRetry[StateSyncEventResponse](ctx, c, url)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &response.Result, nil
 }
 
 func (c *Client) FetchLatestSpan(ctx context.Context) (*Span, error) {
@@ -244,6 +264,8 @@ func (c *Client) FetchMilestone(ctx context.Context, number int64) (*Milestone, 
 		}
 		return nil, err
 	}
+
+	response.Result.Id = MilestoneId(number)
 
 	return &response.Result, nil
 }
@@ -432,10 +454,13 @@ func latestSpanURL(urlString string) (*url.URL, error) {
 	return makeURL(urlString, fetchSpanLatest, "")
 }
 
-func stateSyncURL(urlString string, fromID uint64, to int64) (*url.URL, error) {
+func stateSyncListURL(urlString string, fromID uint64, to int64) (*url.URL, error) {
 	queryParams := fmt.Sprintf(fetchStateSyncEventsFormat, fromID, to, stateFetchLimit)
-
 	return makeURL(urlString, fetchStateSyncEventsPath, queryParams)
+}
+
+func stateSyncURL(urlString string, id uint64) (*url.URL, error) {
+	return makeURL(urlString, fmt.Sprintf(fetchStateSyncEvent, fmt.Sprint(id)), "")
 }
 
 func checkpointURL(urlString string, number int64) (*url.URL, error) {
