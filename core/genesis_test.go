@@ -56,6 +56,7 @@ func TestGenesisBlockRoots(t *testing.T) {
 	}
 
 	block, _, err = core.GenesisToBlock(core.GnosisGenesisBlock(), "", log.Root())
+
 	require.NoError(err)
 	if block.Root() != params.GnosisGenesisStateRoot {
 		t.Errorf("wrong Gnosis Chain genesis state root, got %v, want %v", block.Root(), params.GnosisGenesisStateRoot)
@@ -65,12 +66,22 @@ func TestGenesisBlockRoots(t *testing.T) {
 	}
 
 	block, _, err = core.GenesisToBlock(core.ChiadoGenesisBlock(), "", log.Root())
+
 	require.NoError(err)
 	if block.Root() != params.ChiadoGenesisStateRoot {
 		t.Errorf("wrong Chiado genesis state root, got %v, want %v", block.Root(), params.ChiadoGenesisStateRoot)
 	}
 	if block.Hash() != params.ChiadoGenesisHash {
 		t.Errorf("wrong Chiado genesis hash, got %v, want %v", block.Hash(), params.ChiadoGenesisHash)
+	}
+
+	block, _, err = core.GenesisToVerkleBlock(core.VerkleGenDevnet2GenesisBlock(), "")
+	require.NoError(err)
+	if block.Root() != params.VerkleGenDevnet2StateRoot {
+		t.Errorf("wrong Verkle-Gen-Devnet2 genesis state root, got %v, want %v", block.Root(), params.VerkleGenDevnet2StateRoot)
+	}
+	if block.Hash() != params.VerkleGenDevnet2GenesisHash {
+		t.Errorf("wrong verkle-gen-devnet2 genesis hash, got %v, want %v", block.Hash(), params.VerkleGenDevnet2GenesisHash)
 	}
 }
 

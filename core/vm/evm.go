@@ -25,9 +25,11 @@ import (
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 
 	"github.com/ledgerwatch/erigon/common/u256"
+	statedb "github.com/ledgerwatch/erigon/core/state"
 	"github.com/ledgerwatch/erigon/core/vm/evmtypes"
 	"github.com/ledgerwatch/erigon/crypto"
 	"github.com/ledgerwatch/erigon/params"
+	"github.com/ledgerwatch/erigon/turbo/trie/vkutils"
 )
 
 // emptyCodeHash is used by create to ensure deployment is disallowed to already
@@ -37,12 +39,14 @@ var emptyCodeHash = crypto.Keccak256Hash(nil)
 func (evm *EVM) precompile(addr libcommon.Address) (PrecompiledContract, bool) {
 	var precompiles map[libcommon.Address]PrecompiledContract
 	switch {
-	case evm.chainRules.IsPrague:
+	case evm.chainRules.IsOsaka:
 		precompiles = PrecompiledContractsPrague
 	case evm.chainRules.IsNapoli:
 		precompiles = PrecompiledContractsNapoli
 	case evm.chainRules.IsCancun:
 		precompiles = PrecompiledContractsCancun
+	case evm.chainRules.IsPrague:
+		precompiles = PrecompiledContractsBerlin
 	case evm.chainRules.IsBerlin:
 		precompiles = PrecompiledContractsBerlin
 	case evm.chainRules.IsIstanbul:
@@ -107,7 +111,9 @@ func NewEVM(blockCtx evmtypes.BlockContext, txCtx evmtypes.TxContext, state evmt
 		chainConfig:     chainConfig,
 		chainRules:      chainConfig.Rules(blockCtx.BlockNumber, blockCtx.Time),
 	}
-
+	if txCtx.Accesses == nil && chainConfig.IsOsaka(blockCtx.Time) {
+		evm.TxContext.Accesses = statedb.NewAccessWitness(vkutils.NewPointCache())
+	}
 	evm.interpreter = NewEVMInterpreter(evm, vmConfig)
 
 	return evm
@@ -118,7 +124,9 @@ func NewEVM(blockCtx evmtypes.BlockContext, txCtx evmtypes.TxContext, state evmt
 func (evm *EVM) Reset(txCtx evmtypes.TxContext, ibs evmtypes.IntraBlockState) {
 	evm.TxContext = txCtx
 	evm.intraBlockState = ibs
-
+	if txCtx.Accesses == nil && evm.chainRules.IsOsaka {
+		evm.TxContext.Accesses = statedb.NewAccessWitness(vkutils.NewPointCache())
+	}
 	// ensure the evm is reset to be used again
 	atomic.StoreInt32(&evm.abort, 0)
 }
@@ -162,6 +170,20 @@ func (evm *EVM) Interpreter() Interpreter {
 	return evm.interpreter
 }
 
+// tryConsumeGas tries to subtract gas from gasPool, setting the result in gasPool
+// if subtracting more gas than remains in gasPool, set gasPool = 0 and return false
+// otherwise, do the subtraction setting the result in gasPool and return true
+func tryConsumeGas(gasPool *uint64, gas uint64) bool {
+	// XXX check this is still needed as a func
+	if *gasPool < gas {
+		*gasPool = 0
+		return false
+	}
+
+	*gasPool -= gas
+	return true
+}
+
 func (evm *EVM) call(typ OpCode, caller ContractRef, addr libcommon.Address, input []byte, gas uint64, value *uint256.Int, bailout bool) (ret []byte, leftOverGas uint64, err error) {
 	depth := evm.interpreter.Depth()
 
@@ -187,9 +209,15 @@ func (evm *EVM) call(typ OpCode, caller ContractRef, addr libcommon.Address, inp
 	}
 
 	snapshot := evm.intraBlockState.Snapshot()
-
+	var creation bool
 	if typ == CALL {
 		if !evm.intraBlockState.Exist(addr) {
+			if !isPrecompile && evm.chainRules.IsEIP158 && value.Sign() == 0 {
+				if evm.chainRules.IsOsaka {
+					// proof of absence
+					tryConsumeGas(&gas, evm.TxContext.Accesses.TouchAndChargeProofOfAbsence(caller.Address().Bytes()))
+				}
+			}
 			if !isPrecompile && evm.chainRules.IsSpuriousDragon && value.IsZero() {
 				if evm.config.Debug {
 					v := value
@@ -208,6 +236,7 @@ func (evm *EVM) call(typ OpCode, caller ContractRef, addr libcommon.Address, inp
 				return nil, gas, nil
 			}
 			evm.intraBlockState.CreateAccount(addr, false)
+			creation = true
 		}
 		evm.Context.Transfer(evm.intraBlockState, caller.Address(), addr, value, bailout)
 	} else if typ == STATICCALL {
@@ -259,6 +288,7 @@ func (evm *EVM) call(typ OpCode, caller ContractRef, addr libcommon.Address, inp
 			contract = NewContract(caller, addrCopy, value, gas, evm.config.SkipAnalysis)
 		}
 		contract.SetCallCode(&addrCopy, codeHash, code)
+		contract.IsDeployment = creation
 		readOnly := false
 		if typ == STATICCALL {
 			readOnly = true
@@ -399,6 +429,7 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemainin
 	// The contract is a scoped environment for this execution context only.
 	contract := NewContract(caller, address, value, gasRemaining, evm.config.SkipAnalysis)
 	contract.SetCodeOptionalHash(&address, codeAndHash)
+	contract.IsDeployment = true
 
 	if evm.config.NoRecursion && depth > 0 {
 		return nil, address, gasRemaining, nil
@@ -439,6 +470,13 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gasRemainin
 		evm.intraBlockState.RevertToSnapshot(snapshot)
 		if err != ErrExecutionReverted {
 			contract.UseGas(contract.Gas)
+		}
+	}
+
+	if err == nil && evm.chainRules.IsOsaka {
+		if !contract.UseGas(evm.TxContext.Accesses.TouchAndChargeContractCreateCompleted(address.Bytes()[:])) {
+			evm.intraBlockState.RevertToSnapshot(snapshot)
+			err = ErrOutOfGas
 		}
 	}
 
