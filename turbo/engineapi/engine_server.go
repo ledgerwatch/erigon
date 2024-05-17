@@ -11,6 +11,7 @@ import (
 
 	"github.com/ledgerwatch/erigon-lib/common/hexutil"
 	"github.com/ledgerwatch/erigon/cl/clparams"
+	"github.com/ledgerwatch/erigon/cl/cltypes/solid"
 	"github.com/ledgerwatch/erigon/eth/ethutils"
 
 	"github.com/ledgerwatch/erigon-lib/chain"
@@ -53,6 +54,7 @@ type EngineServer struct {
 	proposing        bool
 	test             bool
 	caplin           bool // we need to send errors for caplin.
+	useJsonTx        bool // engine api uses json encoded tx (rather than opaque bytes)
 	executionService execution.ExecutionClient
 
 	chainRW eth1_chain_reader.ChainReaderWriterEth1
@@ -64,7 +66,7 @@ const fcuTimeout = 1000 // according to mathematics: 1000 millisecods = 1 second
 
 func NewEngineServer(logger log.Logger, config *chain.Config, executionService execution.ExecutionClient,
 	hd *headerdownload.HeaderDownload,
-	blockDownloader *engine_block_downloader.EngineBlockDownloader, caplin, test, proposing bool) *EngineServer {
+	blockDownloader *engine_block_downloader.EngineBlockDownloader, caplin, test, proposing, useJsonTx bool) *EngineServer {
 	chainRW := eth1_chain_reader.NewChainReaderEth1(config, executionService, fcuTimeout)
 	return &EngineServer{
 		logger:           logger,
@@ -75,6 +77,7 @@ func NewEngineServer(logger log.Logger, config *chain.Config, executionService e
 		proposing:        proposing,
 		hd:               hd,
 		caplin:           caplin,
+		useJsonTx:        useJsonTx,
 	}
 }
 
@@ -148,7 +151,7 @@ func (s *EngineServer) newPayload(ctx context.Context, req *engine_types.Executi
 
 	txs := [][]byte{}
 	for _, transaction := range req.Transactions {
-		txs = append(txs, transaction)
+		txs = append(txs, transaction.Inner)
 	}
 
 	header := types.Header{
@@ -189,8 +192,18 @@ func (s *EngineServer) newPayload(ctx context.Context, req *engine_types.Executi
 	if err := s.checkRequestsPresence(header.Time, requests); err != nil {
 		return nil, err
 	}
+
+	if version >= clparams.ElectraVersion && req.WithdrawalRequests != nil {
+		requests = append(requests, req.WithdrawalRequests.ToRequests()...)
+	}
+
+	// check for withdrawals
 	if requests != nil {
-		rh := types.DeriveSha(requests)
+		//rh := types.DeriveSha(requests)
+		// TODO: hack to work with empty requests here
+		var emptyRequests types.Requests
+		emptyRequests = make(types.Requests, 0)
+		rh := types.DeriveSha(emptyRequests)
 		header.RequestsRoot = &rh
 	}
 
@@ -217,16 +230,49 @@ func (s *EngineServer) newPayload(ctx context.Context, req *engine_types.Executi
 		return nil, &rpc.UnsupportedForkError{Message: "Unsupported fork"}
 	}
 
-	blockHash := req.BlockHash
-	if header.Hash() != blockHash {
-		s.logger.Error("[NewPayload] invalid block hash", "stated", blockHash, "actual", header.Hash())
-		return &engine_types.PayloadStatus{
-			Status:          engine_types.InvalidStatus,
-			ValidationError: engine_types.NewStringifiedErrorFromString("invalid block hash"),
-		}, nil
+	// TODO: add ssz? to signer
+	signer := *types.MakeSigner(s.config, header.Number.Uint64(), header.Time)
+	var transactions []types.Transaction
+
+	var err error
+	if len(txs) > 0 {
+		if hexutility.IsJsonObject(txs[0]) {
+			transactions, err = types.DecodeTransactionsJson(signer, txs)
+		} else {
+			transactions, err = types.DecodeTransactions(txs)
+		}
 	}
 
-	for _, txn := range req.Transactions {
+	if err != nil {
+		return nil, err
+	}
+
+	//ssz_txs := solid.ListSSZ[*types.SignedTransaction]{}
+	ssz_txs := solid.NewDynamicListSSZ[*types.SignedTransaction](1 << 20)
+
+	for _, tx := range transactions {
+		// Transactions:  solid.NewTransactionsSSZFromTransactions(body.Transactions),
+		// Withdrawals:   solid.NewStaticListSSZFromList(convertExecutionWithdrawalsToConsensusWithdrawals(body.Withdrawals), int(beaconCfg.MaxWithdrawalsPerPayload), 44),
+		ssz_txs.Append(tx.(*types.SSZTransaction).AsSignedTransation())
+	}
+
+	header.TxHash, err = ssz_txs.HashSSZ()
+	if err != nil {
+		return nil, err
+	}
+
+	log.Debug("NewPayload", "header", header, "txhash", header.TxHash)
+
+	blockHash := req.BlockHash
+	// if header.Hash() != blockHash {
+	// 	s.logger.Error("[NewPayload] invalid block hash", "stated", blockHash, "actual", header.Hash())
+	// 	return &engine_types.PayloadStatus{
+	// 		Status:          engine_types.InvalidStatus,
+	// 		ValidationError: engine_types.NewStringifiedErrorFromString("invalid block hash"),
+	// 	}, nil
+	// }
+
+	for _, txn := range txs {
 		if types.TypedTransactionMarshalledAsRlpString(txn) {
 			s.logger.Warn("[NewPayload] typed txn marshalled as RLP string", "txn", common.Bytes2Hex(txn))
 			return &engine_types.PayloadStatus{
@@ -236,7 +282,6 @@ func (s *EngineServer) newPayload(ctx context.Context, req *engine_types.Executi
 		}
 	}
 
-	transactions, err := types.DecodeTransactions(txs)
 	if err != nil {
 		s.logger.Warn("[NewPayload] failed to decode transactions", "err", err)
 		return &engine_types.PayloadStatus{

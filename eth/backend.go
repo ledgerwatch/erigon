@@ -303,7 +303,6 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 		if _, ok := genesisErr.(*chain.ConfigCompatError); genesisErr != nil && !ok {
 			return genesisErr
 		}
-
 		return nil
 	}); err != nil {
 		panic(err)
@@ -311,7 +310,6 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 	backend.chainConfig = chainConfig
 	backend.genesisBlock = genesis
 	backend.genesisHash = genesis.Hash()
-
 	setBorDefaultMinerGasPrice(chainConfig, config, logger)
 	setBorDefaultTxPoolPriceLimit(chainConfig, config.TxPool, logger)
 
@@ -921,7 +919,8 @@ func New(ctx context.Context, stack *node.Node, config *ethconfig.Config, logger
 			backend.chainDB, chainConfig, tmpdir, config.Sync),
 		config.InternalCL && !caplinUseEngineAPI, // If the chain supports the engine API, then we should not make the server fail.
 		false,
-		config.Miner.EnabledPOS)
+		config.Miner.EnabledPOS,
+		config.EngineAPIJsonUse)
 	backend.engineBackendRPC = engineBackendRPC
 
 	// If we choose not to run a consensus layer, run our embedded.
