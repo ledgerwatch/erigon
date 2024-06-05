@@ -311,7 +311,7 @@ func FillDBFromSnapshots(logPrefix string, ctx context.Context, tx kv.RwTx, dirs
 		case stages.Headers:
 			h2n := etl.NewCollector(logPrefix, dirs.Tmp, etl.NewSortableBuffer(etl.BufferOptimalSize), logger)
 			defer h2n.Close()
-			h2n.LogLvl(log.LvlDebug)
+			h2n.LogLvl(log.LvlInfo)
 
 			// fill some small tables from snapshots, in future we may store this data in snapshots also, but
 			// for now easier just store them in db

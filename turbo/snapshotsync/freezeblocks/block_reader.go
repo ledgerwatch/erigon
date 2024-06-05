@@ -381,7 +381,7 @@ func (r *BlockReader) HeaderByNumber(ctx context.Context, tx kv.Getter, blockHei
 
 	if tx != nil {
 		if dbgLogs {
-			log.Info(dbgPrefix + "RoTx is nil")
+			log.Info(dbgPrefix + "RoTx not nil")
 		}
 
 		blockHash, err := rawdb.ReadCanonicalHash(tx, blockHeight)
