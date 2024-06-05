@@ -18,6 +18,7 @@ import (
 	"github.com/ledgerwatch/erigon-lib/chain"
 	"github.com/ledgerwatch/erigon-lib/chain/networkname"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
+	"github.com/ledgerwatch/erigon-lib/common/dbg"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon/accounts/abi"
 	"github.com/ledgerwatch/erigon/common/math"
@@ -245,7 +246,9 @@ func BorHeimdallForward(
 			)
 		}
 
-		header, err := cfg.blockReader.HeaderByNumber(ctx, tx, blockNum)
+		cDebug := dbg.ContextWithDebug(ctx, true)
+
+		header, err := cfg.blockReader.HeaderByNumber(cDebug, tx, blockNum)
 		if err != nil {
 			return err
 		}

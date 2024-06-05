@@ -372,24 +372,48 @@ func (r *BlockReader) HeaderByNumber(ctx context.Context, tx kv.Getter, blockHei
 	//	h = rawdb.ReadHeader(tx, blockHash, blockHeight)
 	//	return h, nil
 	//}
+
+	var dbgPrefix string
+	dbgLogs := dbg.Enabled(ctx)
+	if dbgLogs {
+		dbgPrefix = fmt.Sprintf("[dbg] BlockReader(idxMax=%d,segMax=%d).HeaderByNumber(blockHeight=%d) -> ", r.sn.idxMax.Load(), r.sn.segmentsMax.Load(), blockHeight)
+	}
+
 	if tx != nil {
+		if dbgLogs {
+			log.Info(dbgPrefix + "RoTx is nil")
+		}
+
 		blockHash, err := rawdb.ReadCanonicalHash(tx, blockHeight)
 		if err != nil {
 			return nil, err
 		}
+		if dbgLogs {
+			log.Info(dbgPrefix + fmt.Sprintf("blockHash: %v", blockHash))
+		}
 		if blockHash == (common.Hash{}) {
 			return nil, nil
 		}
+
 		h = rawdb.ReadHeader(tx, blockHash, blockHeight)
+		if dbgLogs {
+			log.Info(dbgPrefix + fmt.Sprintf("header: %v", h))
+		}
 		if h != nil {
 			return h, nil
 		}
 	}
 
+	if dbgLogs {
+		log.Info(dbgPrefix + "reading from snapshot")
+	}
 	view := r.sn.View()
 	defer view.Close()
 	seg, ok := view.HeadersSegment(blockHeight)
 	if !ok {
+		if dbgLogs {
+			log.Info(dbgPrefix + "seg not ok")
+		}
 		return
 	}
 
