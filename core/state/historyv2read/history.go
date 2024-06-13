@@ -2,6 +2,7 @@ package historyv2read
 
 import (
 	"encoding/binary"
+	"errors"
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/length"
@@ -43,7 +44,7 @@ func RestoreCodeHash(tx kv.Getter, key, v []byte, force *libcommon.Hash) ([]byte
 	return v, nil
 }
 
-func GetAsOf(tx kv.Tx, indexC kv.Cursor, changesC kv.CursorDupSort, storage bool, key []byte, timestamp uint64) (v []byte, fromHistory bool, err error) {
+func GetAsOf(indexC kv.Cursor, changesC kv.CursorDupSort, storage bool, key []byte, timestamp uint64) (v []byte, fromHistory bool, err error) {
 	v, ok, err := historyv2.FindByHistory(indexC, changesC, storage, key, timestamp)
 	if err != nil {
 		return nil, true, err
@@ -51,6 +52,5 @@ func GetAsOf(tx kv.Tx, indexC kv.Cursor, changesC kv.CursorDupSort, storage bool
 	if ok {
 		return v, true, nil
 	}
-	v, err = tx.GetOne(kv.PlainState, key)
-	return v, false, err
+	return v, false, errors.New("not found")
 }

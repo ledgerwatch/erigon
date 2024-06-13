@@ -20,16 +20,18 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"github.com/ledgerwatch/erigon-lib/kv/dbutils"
 	"sort"
+
+	"github.com/ledgerwatch/erigon-lib/kv/dbutils"
 
 	"github.com/google/btree"
 	"github.com/holiman/uint256"
+	"github.com/ledgerwatch/log/v3"
+
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 	"github.com/ledgerwatch/erigon-lib/common/length"
 	"github.com/ledgerwatch/erigon-lib/kv"
 	"github.com/ledgerwatch/erigon-lib/kv/kvcfg"
-	"github.com/ledgerwatch/log/v3"
 
 	"github.com/ledgerwatch/erigon/core/state/historyv2read"
 	"github.com/ledgerwatch/erigon/core/types/accounts"
@@ -61,6 +63,8 @@ func NewPlainState(tx kv.Tx, blockNr uint64, systemContractLookup map[libcommon.
 	if histV3 {
 		panic("Please use HistoryStateReaderV3 with HistoryV3")
 	}
+
+	// check if block number is active
 	ps := &PlainState{
 		tx:                   tx,
 		blockNr:              blockNr,
@@ -96,7 +100,7 @@ func (s *PlainState) ForEachStorage(addr libcommon.Address, startLocation libcom
 	st := btree.New(16)
 	var k [length.Addr + length.Incarnation + length.Hash]byte
 	copy(k[:], addr[:])
-	accData, _, err := historyv2read.GetAsOf(s.tx, s.accHistoryC, s.accChangesC, false /* storage */, addr[:], s.blockNr)
+	accData, _, err := historyv2read.GetAsOf(s.accHistoryC, s.accChangesC, false /* storage */, addr[:], s.blockNr)
 	if err != nil {
 		return err
 	}
@@ -169,7 +173,7 @@ func (s *PlainState) ForEachStorage(addr libcommon.Address, startLocation libcom
 }
 
 func (s *PlainState) ReadAccountData(address libcommon.Address) (*accounts.Account, error) {
-	enc, fromHistory, err := historyv2read.GetAsOf(s.tx, s.accHistoryC, s.accChangesC, false /* storage */, address[:], s.blockNr)
+	enc, fromHistory, err := historyv2read.GetAsOf(s.accHistoryC, s.accChangesC, false /* storage */, address[:], s.blockNr)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +212,7 @@ func (s *PlainState) ReadAccountData(address libcommon.Address) (*accounts.Accou
 
 func (s *PlainState) ReadAccountStorage(address libcommon.Address, incarnation uint64, key *libcommon.Hash) ([]byte, error) {
 	compositeKey := dbutils.PlainGenerateCompositeStorageKey(address.Bytes(), incarnation, key.Bytes())
-	enc, _, err := historyv2read.GetAsOf(s.tx, s.storageHistoryC, s.storageChangesC, true /* storage */, compositeKey, s.blockNr)
+	enc, _, err := historyv2read.GetAsOf(s.storageHistoryC, s.storageChangesC, true /* storage */, compositeKey, s.blockNr)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +248,7 @@ func (s *PlainState) ReadAccountCodeSize(address libcommon.Address, incarnation 
 }
 
 func (s *PlainState) ReadAccountIncarnation(address libcommon.Address) (uint64, error) {
-	enc, _, err := historyv2read.GetAsOf(s.tx, s.accHistoryC, s.accChangesC, false /* storage */, address[:], s.blockNr+1)
+	enc, _, err := historyv2read.GetAsOf(s.accHistoryC, s.accChangesC, false /* storage */, address[:], s.blockNr+1)
 	if err != nil {
 		return 0, err
 	}

@@ -23,9 +23,10 @@ import (
 	"path"
 	"time"
 
+	"gopkg.in/yaml.v2"
+
 	"github.com/ledgerwatch/erigon-lib/chain/networkname"
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
-	"gopkg.in/yaml.v2"
 
 	"github.com/ledgerwatch/erigon/cl/utils"
 )
