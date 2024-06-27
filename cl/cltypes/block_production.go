@@ -19,6 +19,13 @@ type BlindOrExecutionBeaconBlock struct {
 	ExecutionValue    *big.Int           `json:"-"`
 }
 
+func (b *BlindOrExecutionBeaconBlock) ToGeneric() GenericBeaconBlock {
+	if b.BlindedBeaconBody != nil {
+		return b.ToBlinded()
+	}
+	return b.ToExecution()
+}
+
 func (b *BlindOrExecutionBeaconBlock) ToBlinded() *BlindedBeaconBlock {
 	return &BlindedBeaconBlock{
 		Slot:          b.Slot,
