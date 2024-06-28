@@ -164,7 +164,7 @@ func makeCallVariantGasCallEIP2929(oldCalculator gasFunc) gasFunc {
 		if addrMod {
 			// Charge the remaining difference here already, to correctly calculate available
 			// gas for call
-			if !contract.UseGas(coldCost, tracing.GasChangeCallStorageColdAccess) {
+			if !contract.UseGas(coldCost, evm.Config().Tracer, tracing.GasChangeCallStorageColdAccess) {
 				return 0, ErrOutOfGas
 			}
 		}

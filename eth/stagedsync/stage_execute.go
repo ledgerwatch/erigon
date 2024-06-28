@@ -27,6 +27,7 @@ import (
 	"github.com/ledgerwatch/erigon/core"
 	"github.com/ledgerwatch/erigon/core/rawdb"
 	"github.com/ledgerwatch/erigon/core/state"
+	"github.com/ledgerwatch/erigon/core/tracing"
 	"github.com/ledgerwatch/erigon/core/types"
 	"github.com/ledgerwatch/erigon/core/types/accounts"
 	"github.com/ledgerwatch/erigon/core/vm"
@@ -150,13 +151,15 @@ func executeBlock(
 		return h
 	}
 
-	getTracer := func(txIndex int, txHash common.Hash) (vm.EVMLogger, error) {
-		return tracelogger.NewStructLogger(&tracelogger.LogConfig{}), nil
+	getTracer := func(txIndex int, txHash common.Hash) (*tracing.Hooks, error) {
+		return tracelogger.NewStructLogger(&tracelogger.LogConfig{}).Hooks(), nil
 	}
 
 	callTracer := calltracer.NewCallTracer()
 	vmConfig.Debug = true
-	vmConfig.Tracer = callTracer
+	if vmConfig.Tracer == nil {
+		vmConfig.Tracer = callTracer.Tracer().Hooks
+	}
 
 	var receipts types.Receipts
 	var stateSyncReceipt *types.Receipt
