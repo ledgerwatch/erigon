@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ledgerwatch/erigon/core/rawdb/rawtemporaldb"
 	"github.com/ledgerwatch/erigon/eth/ethconfig/estimate"
 
 	"github.com/c2h5oh/datasize"
@@ -603,6 +604,7 @@ func ExecV3(ctx context.Context,
 
 	slowDownLimit := time.NewTicker(time.Second)
 	defer slowDownLimit.Stop()
+	canonicalReader := rawdb.NewCanonicalReader()
 
 	var readAhead chan uint64
 	if !parallel {
@@ -613,6 +615,7 @@ func ExecV3(ctx context.Context,
 		readAhead, clean = blocksReadAhead(ctx, &cfg, 4, engine, true)
 		defer clean()
 	}
+	var baseBlockTxnID kv.TxnId
 
 	//fmt.Printf("exec blocks: %d -> %d\n", blockNum, maxBlockNum)
 
@@ -646,6 +649,10 @@ Loop:
 		header := b.HeaderNoCopy()
 		skipAnalysis := core.SkipAnalysis(chainConfig, blockNum)
 		signer := *types.MakeSigner(chainConfig, blockNum, header.Time)
+		baseBlockTxnID, err = canonicalReader.BaseTxnID(applyTx, blockNum, b.Hash())
+		if err != nil {
+			return err
+		}
 
 		f := core.GetHashFn(header, getHeaderFunc)
 		getHashFnMute := &sync.Mutex{}
@@ -783,6 +790,10 @@ Loop:
 					if txTask.Final {
 						checkReceipts := !cfg.vmConfig.StatelessExec && chainConfig.IsByzantium(txTask.BlockNum) && !cfg.vmConfig.NoReceipts
 						if txTask.BlockNum > 0 && !skipPostEvaluation { //Disable check for genesis. Maybe need somehow improve it in future - to satisfy TestExecutionSpec
+							// Set the receipt logs and create a bloom for filtering
+							for _, r := range receipts {
+								r.Bloom = types.CreateBloom(types.Receipts{r})
+							}
 							if err := core.BlockPostValidation(usedGas, blobGasUsed, checkReceipts, types.DeriveSha(receipts), txTask.Header); err != nil {
 								return fmt.Errorf("%w, txnIdx=%d, %v", consensus.ErrInvalidBlock, txTask.TxIndex, err) //same as in stage_exec.go
 							}
@@ -791,28 +802,11 @@ Loop:
 						receipts = receipts[:0]
 					} else {
 						if txTask.TxIndex >= 0 {
-							// by the tx.
-							receipt := &types.Receipt{
-								BlockNumber:       header.Number,
-								TransactionIndex:  uint(txTask.TxIndex),
-								Type:              txTask.Tx.Type(),
-								CumulativeGasUsed: usedGas,
-								GasUsed:           txTask.UsedGas,
-								TxHash:            txTask.Tx.Hash(),
-								Logs:              txTask.Logs,
+							receipt := txTask.CreateReceipt(usedGas)
+							txnID := baseBlockTxnID + kv.TxnId(txTask.TxIndex)
+							if err := rawtemporaldb.AppendReceipts(doms, txnID, receipt); err != nil {
+								return err
 							}
-							receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
-							if txTask.Failed {
-								receipt.Status = types.ReceiptStatusFailed
-							} else {
-								receipt.Status = types.ReceiptStatusSuccessful
-							}
-							// if the transaction created a contract, store the creation address in the receipt.
-							//if msg.To() == nil {
-							//	receipt.ContractAddress = crypto.CreateAddress(evm.Origin, tx.GetNonce())
-							//}
-							// Set the receipt logs and create a bloom for filtering
-							//receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
 							receipts = append(receipts, receipt)
 						}
 					}
