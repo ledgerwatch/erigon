@@ -17,6 +17,7 @@
 package vm
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sort"
 
@@ -24,6 +25,7 @@ import (
 
 	libcommon "github.com/ledgerwatch/erigon-lib/common"
 
+	"github.com/ledgerwatch/erigon/core/tracing"
 	"github.com/ledgerwatch/erigon/params"
 )
 
@@ -315,4 +317,378 @@ func enable7516(jt *JumpTable) {
 		numPop:      0,
 		numPush:     1,
 	}
+}
+
+// enableEOF applies the EOF changes.
+func enableEOF(jt *JumpTable) {
+	// TODO(racytech): Make sure everything is correct, add all EOF opcodes and remove deprecated ones
+	// add them to `opCodeToString` as well
+	undefined := &operation{
+		execute:     opUndefined,
+		constantGas: 0,
+		numPop:      0,
+		numPush:     0,
+		undefined:   true,
+	}
+
+	jt[JUMP] = undefined
+	jt[JUMPI] = undefined
+	jt[PC] = undefined
+
+	// 0x38, 0x39, 0x3b, 0x3c, 0x3f, 0x5a, 0xf0, 0xf1, 0xf2, 0xf4, 0xf5, 0xfa, 0xff - rejected opcodes
+	jt[CODESIZE] = undefined     // 0x38
+	jt[CODECOPY] = undefined     // 0x39
+	jt[EXTCODESIZE] = undefined  // 0x3b
+	jt[EXTCODECOPY] = undefined  // 0x3c
+	jt[EXTCODEHASH] = undefined  // 0x3f
+	jt[GAS] = undefined          // 0x5a
+	jt[CREATE] = undefined       // 0xf0
+	jt[CALL] = undefined         // 0xf1
+	jt[CALLCODE] = undefined     // 0xf2
+	jt[DELEGATECALL] = undefined // 0xf4
+	jt[CREATE2] = undefined      // 0xf5
+	jt[STATICCALL] = undefined   // 0xfa
+	jt[SELFDESTRUCT] = undefined // 0xff
+
+	jt[RJUMP] = &operation{
+		execute:       opRjump,
+		constantGas:   GasQuickStep,
+		numPop:        0,
+		numPush:       0,
+		immediateSize: 2,
+	}
+	jt[RJUMPI] = &operation{
+		execute:       opRjumpi,
+		constantGas:   GasSwiftStep,
+		numPop:        1,
+		numPush:       0,
+		immediateSize: 2,
+	}
+	jt[RJUMPV] = &operation{
+		execute:       opRjumpv,
+		constantGas:   GasSwiftStep,
+		numPop:        1,
+		numPush:       0,
+		immediateSize: 1,
+	}
+	jt[CALLF] = &operation{
+		execute:       opCallf,
+		constantGas:   GasFastStep,
+		numPop:        0,
+		numPush:       0,
+		immediateSize: 2,
+	}
+	jt[RETF] = &operation{
+		execute:     opRetf,
+		constantGas: GasFastestStep,
+		numPop:      0,
+		numPush:     0,
+		terminal:    true,
+	}
+	jt[JUMPF] = &operation{
+		execute:       opJumpf,
+		constantGas:   GasFastStep,
+		numPop:        0,
+		numPush:       0,
+		terminal:      true,
+		immediateSize: 2,
+	}
+	jt[DUPN] = &operation{
+		execute:       opDupN,
+		constantGas:   GasFastestStep,
+		numPop:        0,
+		numPush:       1,
+		immediateSize: 1,
+	}
+	jt[SWAPN] = &operation{
+		execute:       opSwapN,
+		constantGas:   GasFastestStep,
+		numPop:        0,
+		numPush:       0,
+		immediateSize: 1,
+	}
+	jt[EXCHANGE] = &operation{ // TODO(racytech)
+		constantGas:   GasFastestStep,
+		immediateSize: 1,
+	}
+	jt[DATALOAD] = &operation{
+		execute:     opDataLoad,
+		constantGas: GasSwiftStep,
+		numPop:      1,
+		numPush:     1,
+	}
+	jt[DATALOADN] = &operation{
+		execute:       opDataLoad,
+		constantGas:   GasFastestStep,
+		numPop:        0,
+		numPush:       1,
+		immediateSize: 2,
+	}
+	jt[DATASIZE] = &operation{
+		execute:     opDataSize,
+		constantGas: GasQuickStep,
+		numPop:      0,
+		numPush:     1,
+	}
+	jt[DATACOPY] = &operation{
+		execute:     opDataCopy,
+		constantGas: GasFastestStep,
+		dynamicGas:  gasDataCopyEIP7480,
+		numPop:      3,
+		numPush:     0,
+		memorySize:  memoryDataCopy,
+	}
+	// TODO(racytech): add EOFCREATE, TXCREATE and RETURNCONTRACT
+	jt[EOFCREATE] = &operation{
+		execute:       opEOFCreate,
+		constantGas:   params.CreateGas,
+		immediateSize: 1,
+	}
+	jt[TXCREATE] = &operation{}
+	jt[RETURNCONTRACT] = &operation{
+		terminal:      true,
+		immediateSize: 1,
+	}
+
+	jt[RETURNDATALOAD] = &operation{}
+	jt[EXTCALL] = &operation{}
+	jt[EXTDELEGATECALL] = &operation{}
+	jt[EXTSTATICCALL] = &operation{}
+
+	immSize := uint8(1)
+	for op := 0x60; op < 0x60+32; op++ {
+		jt[op].immediateSize = immSize
+		immSize++
+	}
+}
+
+// opRjump implements the rjump opcode.
+func opRjump(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		code   = scope.Contract.CodeAt(scope.CodeSection)
+		offset = parseInt16(code[*pc+1:])
+	)
+	// move pc past op and operand (+3), add relative offset, subtract 1 to
+	// account for interpreter loop.
+	*pc = uint64(int64(*pc+3) + int64(offset) - 1)
+	return nil, nil
+}
+
+// opRjumpi implements the RJUMPI opcode
+func opRjumpi(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	condition := scope.Stack.Pop()
+	if condition.BitLen() == 0 {
+		// Not branching, just skip over immediate argument.
+		*pc += 2
+		return nil, nil
+	}
+	return opRjump(pc, interpreter, scope)
+}
+
+// opRjumpv implements the RJUMPV opcode
+func opRjumpv(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		code  = scope.Contract.CodeAt(scope.CodeSection)
+		count = uint64(code[*pc+1])
+		idx   = scope.Stack.Pop()
+	)
+	if idx, overflow := idx.Uint64WithOverflow(); overflow || idx >= count {
+		// Index out-of-bounds, don't branch, just skip over immediate
+		// argument.
+		*pc += 1 + count*2
+		return nil, nil
+	}
+	offset := parseInt16(code[*pc+2+2*idx.Uint64():])
+	*pc = uint64(int64(*pc+2+count*2) + int64(offset) - 1)
+	return nil, nil
+}
+
+// opCallf implements the CALLF opcode
+func opCallf(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		code = scope.Contract.CodeAt(scope.CodeSection)
+		idx  = binary.BigEndian.Uint16(code[*pc+1:])
+		typ  = scope.Contract.Container.Types[scope.CodeSection]
+	)
+	if scope.Stack.Len()+int(typ.MaxStackHeight) >= 1024 {
+		return nil, fmt.Errorf("stack overflow")
+	}
+	retCtx := &ReturnContext{
+		Section:     scope.CodeSection,
+		Pc:          *pc + 3,
+		StackHeight: scope.Stack.Len() - int(typ.Inputs),
+	}
+	scope.ReturnStack = append(scope.ReturnStack, retCtx)
+	scope.CodeSection = uint64(idx)
+	*pc = 0
+	// *pc -= 1 // hacks xD
+	return nil, nil
+}
+
+// opRetf implements the RETF opcode
+func opRetf(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		last   = len(scope.ReturnStack) - 1
+		retCtx = scope.ReturnStack[last]
+	)
+	scope.ReturnStack = scope.ReturnStack[:last]
+	scope.CodeSection = retCtx.Section
+	*pc = retCtx.Pc - 1
+
+	// If returning from top frame, exit cleanly.
+	if len(scope.ReturnStack) == 0 {
+		return nil, errStopToken
+	}
+	return nil, nil
+}
+
+func opJumpf(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		code    = scope.Contract.CodeAt(scope.CodeSection)
+		section = binary.BigEndian.Uint16(code[*pc+1:])
+		typ     = scope.Contract.Container.Types[scope.CodeSection]
+	)
+	if scope.Stack.Len()+int(typ.MaxStackHeight) >= 1024 {
+		return nil, fmt.Errorf("stack overflow")
+	}
+	scope.CodeSection = uint64(section)
+	*pc = 0
+	return nil, nil
+}
+
+func opDupN(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	// TODO(racytech): not yet merged
+	return nil, nil
+}
+
+func opSwapN(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	// TODO(racytech): not yet merged
+	return nil, nil
+}
+
+func opDataLoad(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		index  = scope.Stack.Pop()
+		data   = scope.Contract.Data()
+		offset = int(index.Uint64()) // with overflow maybe?
+	)
+	if len(data) < 32 || len(data)-32 < offset {
+		return nil, ErrInvalidMemoryAccess
+	}
+	val := new(uint256.Int).SetBytes(data[offset : offset+32])
+	scope.Stack.Push(val)
+	return nil, nil
+}
+
+func opDataLoadN(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		code   = scope.Contract.CodeAt(scope.CodeSection)
+		data   = scope.Contract.Data()
+		offset = int(binary.BigEndian.Uint16(code[*pc+1:]))
+	)
+	if len(data) < 32 || len(data)-32 < offset {
+		return nil, ErrInvalidMemoryAccess
+	}
+	val := new(uint256.Int).SetBytes(data[offset : offset+32])
+	scope.Stack.Push(val)
+	return nil, nil
+}
+
+func opDataSize(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	dataSize := len(scope.Contract.Data())
+	val := new(uint256.Int).SetUint64(uint64(dataSize))
+	scope.Stack.Push(val)
+	return nil, nil
+}
+
+func opDataCopy(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	var (
+		memOffset256 = scope.Stack.Pop()
+		dataIndex256 = scope.Stack.Pop()
+		size256      = scope.Stack.Pop()
+
+		data    = scope.Contract.Data()
+		dataLen = uint64(len(data))
+		src     = dataIndex256.Uint64()
+		dst     = memOffset256.Uint64()
+		size    = size256.Uint64()
+	)
+
+	if dataLen < size || dataLen-size < src {
+		return nil, ErrInvalidMemoryAccess
+	}
+
+	if size > 0 {
+		scope.Memory.Copy(dst, src, size)
+	}
+
+	return nil, nil
+}
+
+func opEOFCreate(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	// + deduct TX_CREATE_COST gas (done in interpreter)
+	// + read immediate operand initcontainer_index, encoded as 8-bit unsigned value
+	// + pop value, salt, input_offset, input_size from the operand stack
+	// - perform (and charge for) memory expansion using [input_offset, input_size]
+	// load initcode EOF subcontainer at initcontainer_index in the container from which EOFCREATE is executed
+	// let initcontainer_size be the declared size of that EOF subcontainer in its parent container header
+	// deduct GAS_KECCAK256_WORD * ((initcontainer_size + 31) // 32) gas (hashing charge)
+	// check that current call depth is below STACK_DEPTH_LIMIT and that caller balance is enough to transfer value
+	// in case of failure return 0 on the stack, caller’s nonce is not updated and gas for initcode execution is not consumed.
+	// caller’s memory slice [input_offset:input_size] is used as calldata
+	// execute the container and deduct gas for execution. The 63/64th rule from EIP-150 applies.
+	// increment sender account’s nonce
+	// calculate new_address as keccak256(0xff || sender || salt || keccak256(initcontainer))[12:]
+	// an unsuccessful execution of initcode results in pushing 0 onto the stack
+	// can populate returndata if execution REVERTed
+	// a successful execution ends with initcode executing RETURNCONTRACT{deploy_container_index}(aux_data_offset, aux_data_size) instruction (see below). After that:
+	// load deploy EOF subcontainer at deploy_container_index in the container from which RETURNCONTRACT is executed
+	// concatenate data section with (aux_data_offset, aux_data_offset + aux_data_size) memory segment and update data size in the header
+	// if updated deploy container size exceeds MAX_CODE_SIZE instruction exceptionally aborts
+	// set state[new_address].code to the updated deploy container
+	// push new_address onto the stack
+	// deduct GAS_CODE_DEPOSIT * deployed_code_size gas
+
+	var (
+		code             = scope.Contract.CodeAt(scope.CodeSection)
+		initContainerIdx = code[*pc+1]
+
+		value  = scope.Stack.Pop()
+		salt   = scope.Stack.Pop()
+		offset = scope.Stack.Pop()
+		size   = scope.Stack.Pop()
+		input  = scope.Memory.GetCopy(int64(offset.Uint64()), int64(size.Uint64()))
+		gas    = scope.Contract.Gas
+	)
+	*pc = *pc + 2
+
+	// TODO(racytech): this should be done in `dynamicGas` func, leave it here for now
+	initContainer := scope.Contract.SubContainerAt(int(initContainerIdx))
+	hashingCharge := uint64(6 * (len(initContainer) + 31) / 32)
+	if !scope.Contract.UseGas(hashingCharge, tracing.GasChangeCallContractEOFCreation) {
+		return nil, ErrOutOfGas
+	}
+
+	gas -= gas / 64
+	scope.Contract.UseGas(gas, tracing.GasChangeCallContractEOFCreation)
+
+	stackValue := size
+	res, addr, returnGas, suberr := interpreter.evm.EOFCreate(scope.Contract, input, initContainer, gas, &value, &salt)
+
+	// Push item on the stack based on the returned error.
+	if suberr != nil {
+		stackValue.Clear()
+	} else {
+		stackValue.SetBytes(addr.Bytes())
+	}
+
+	scope.Stack.Push(&stackValue)
+	scope.Contract.RefundGas(returnGas, tracing.GasChangeCallLeftOverRefunded)
+
+	if suberr == ErrExecutionReverted {
+		interpreter.returnData = res // set REVERT data to return data buffer
+		return res, nil
+	}
+	interpreter.returnData = nil // clear dirty return data buffer
+	return nil, nil
 }
