@@ -11,8 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ledgerwatch/erigon-lib/config3"
-
 	"github.com/holiman/uint256"
 
 	"github.com/ledgerwatch/erigon-lib/chain/networkname"
@@ -55,13 +53,9 @@ var (
 )
 
 // CGO_CFLAGS="-D__BLST_PORTABLE__" : flag required for go test.
-// Example : CGO_CFLAGS="-D__BLST_PORTABLE__" go test -run ^TestMiningBenchmark$ github.com/ledgerwatch/erigon/tests/bor -v -count=1
+// Example : CGO_CFLAGS="-D__BLST_PORTABLE__" go test -tags integration -run ^TestMiningBenchmark$ github.com/ledgerwatch/erigon/tests/bor -v -count=1
 // In TestMiningBenchmark, we will test the mining performance. We will initialize a single node devnet and fire 5000 txs. We will measure the time it takes to include all the txs. This can be made more advcanced by increasing blockLimit and txsInTxpool.
 func TestMiningBenchmark(t *testing.T) {
-	if config3.EnableHistoryV4InTest {
-		t.Skip("TODO: [e4] implement me")
-	}
-
 	log.Root().SetHandler(log.LvlFilterHandler(log.LvlWarn, log.StreamHandler(os.Stderr, log.TerminalFormat())))
 	fdlimit.Raise(2048)
 
@@ -74,7 +68,7 @@ func TestMiningBenchmark(t *testing.T) {
 	var txs []*types.Transaction
 
 	for i := 0; i < 1; i++ {
-		stack, ethBackend, err := helper.InitMiner(context.Background(), &genesis, pkeys[i], true, i)
+		stack, ethBackend, err := helper.InitMiner(context.Background(), t, &genesis, pkeys[i], true, i)
 		if err != nil {
 			panic(err)
 		}
@@ -107,13 +101,16 @@ func TestMiningBenchmark(t *testing.T) {
 	initNonce := uint64(0)
 
 	for i := 0; i < txInTxpool; i++ {
+		fmt.Printf("\rGenerating txs: %d/%d", i, txInTxpool)
 		txn := *newRandomTxWithNonce(false, initNonce+uint64(i), ethbackends[0].TxpoolServer())
 		txs = append(txs, &txn)
 	}
+	fmt.Println()
 
 	start := time.Now()
 
-	for _, txn := range txs {
+	for i, txn := range txs {
+		fmt.Printf("\rAdding txs: %d/%d", i, txInTxpool)
 		buf := bytes.NewBuffer(nil)
 		txV := *txn
 		err := txV.MarshalBinary(buf)
@@ -122,12 +119,15 @@ func TestMiningBenchmark(t *testing.T) {
 		}
 		ethbackends[0].TxpoolServer().Add(context.Background(), &txpool.AddRequest{RlpTxs: [][]byte{buf.Bytes()}})
 	}
+	fmt.Println()
 
 	for {
+
 		pendingReply, err := ethbackends[0].TxpoolServer().Status(context.Background(), &txpool_proto.StatusRequest{})
 		if err != nil {
 			panic(err)
 		}
+		fmt.Printf("\rPending txs: %d/%d", pendingReply.PendingCount, txInTxpool)
 
 		if pendingReply.PendingCount == 0 {
 			break
