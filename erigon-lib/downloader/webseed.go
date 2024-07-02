@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/ledgerwatch/erigon-lib/downloader/downloadercfg"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/ledgerwatch/erigon-lib/downloader/downloadercfg"
 
 	"github.com/hashicorp/go-retryablehttp"
 

@@ -23,7 +23,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"github.com/ledgerwatch/erigon/core/rawdb"
 	"math"
 	"math/big"
 	"math/rand"
@@ -31,6 +30,8 @@ import (
 	"strings"
 	"testing"
 	"testing/quick"
+
+	"github.com/ledgerwatch/erigon/core/rawdb"
 
 	"github.com/holiman/uint256"
 

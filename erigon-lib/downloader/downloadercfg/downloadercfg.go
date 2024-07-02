@@ -25,6 +25,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ledgerwatch/erigon-lib/common/dbg"
+
 	"github.com/anacrolix/dht/v2"
 	lg "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
