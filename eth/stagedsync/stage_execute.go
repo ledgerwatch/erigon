@@ -329,15 +329,15 @@ func unwindExec3(u *UnwindState, s *StageState, txc wrap.TxContainer, ctx contex
 		return err
 	}
 	t := time.Now()
-	var changeset *[kv.DomainLen][]libstate.DomainEntryDiff
+	var changeset *libstate.StateChangeset
 	for currentBlock := u.CurrentBlockNumber; currentBlock > u.UnwindPoint; currentBlock-- {
 		currentHash, err := rawdb.ReadCanonicalHash(txc.Tx, currentBlock)
 		if err != nil {
 			return err
 		}
 		var ok bool
-		var currentKeys [kv.DomainLen][]libstate.DomainEntryDiff
-		currentKeys, ok, err = domains.GetDiffset(txc.Tx, currentHash, currentBlock)
+		var currChangeset libstate.StateChangeset
+		currChangeset, ok, err = domains.GetChangeset(txc.Tx, currentHash, currentBlock)
 		if !ok {
 			return fmt.Errorf("domains.GetDiffset(%d, %s): not found", currentBlock, currentHash)
 		}
@@ -345,14 +345,12 @@ func unwindExec3(u *UnwindState, s *StageState, txc wrap.TxContainer, ctx contex
 			return err
 		}
 		if changeset == nil {
-			changeset = &currentKeys
+			changeset = &currChangeset
 		} else {
-			for i := range currentKeys {
-				changeset[i] = libstate.MergeDiffSets(changeset[i], currentKeys[i])
-			}
+			changeset.MergeWithOlder(&currChangeset)
 		}
 	}
-	if err := rs.Unwind(ctx, txc.Tx, u.UnwindPoint, txNum, accumulator, changeset); err != nil {
+	if err := rs.Unwind(ctx, txc.Tx, u.UnwindPoint, txNum, accumulator, *changeset); err != nil {
 		return fmt.Errorf("StateV3.Unwind(%d->%d): %w, took %s", s.BlockNumber, u.UnwindPoint, err, time.Since(t))
 	}
 	if err := rawdb.TruncateReceipts(txc.Tx, u.UnwindPoint+1); err != nil {

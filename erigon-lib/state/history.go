@@ -1130,6 +1130,104 @@ func (ht *HistoryRoTx) Prune(ctx context.Context, rwTx kv.RwTx, txFrom, txTo, li
 	return ht.iit.Prune(ctx, rwTx, txFrom, txTo, limit, logEvery, forced, pruneValue)
 }
 
+func (h *HistoryRoTx) Unwind(ctx context.Context, rwTx kv.RwTx, domainDiffs []DomainEntryDiff) error {
+	minTxNum := uint64(math.MaxUint64)
+
+	var (
+		historyCursor kv.RwCursor
+		err           error
+	)
+	if h.h.historyLargeValues {
+		historyCursor, err = rwTx.RwCursor(h.h.historyValsTable)
+		if err != nil {
+			return err
+		}
+	} else {
+		historyCursor, err = rwTx.RwCursorDupSort(h.h.historyValsTable)
+		if err != nil {
+			return err
+		}
+	}
+	defer historyCursor.Close()
+
+	for _, diff := range domainDiffs {
+		if err := h.unwindKey(diff.Key[:len(diff.Key)-8], diff.TxNum, historyCursor); err != nil {
+			return err
+		}
+		minTxNum = min(minTxNum, binary.BigEndian.Uint64(diff.TxNum))
+	}
+
+	// Unwind inverted index keys
+	idxCursor, err := rwTx.RwCursorDupSort(h.h.indexKeysTable)
+	if err != nil {
+		return err
+	}
+	defer idxCursor.Close()
+
+	minTxNumBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(minTxNumBytes, minTxNum)
+
+	// Truncate all keys with txNum higher or equal than minTxNum
+	for k, _, err := idxCursor.SeekExact(minTxNumBytes); len(k) > 0; k, _, err = idxCursor.Next() {
+		if err != nil {
+			return err
+		}
+		if err = idxCursor.DeleteCurrent(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (h *HistoryRoTx) unwindKey(key, txNumBytes []byte, historyCursor kv.RwCursor) error {
+	// Unwind down to txNum inclusive
+	txNumToUnwind := binary.BigEndian.Uint64(txNumBytes)
+
+	if h.h.historyLargeValues {
+		seekKey := append(append([]byte{}, key...), txNumBytes...)
+		for k, _, err := historyCursor.Seek(seekKey); err == nil && len(k) > 0; k, _, err = historyCursor.Next() {
+			if err != nil {
+				return err
+			}
+			txNumInDB := binary.BigEndian.Uint64(k[len(k)-8:])
+			if len(k)-8 != len(key) || !bytes.Equal(k[:len(key)], key) {
+				break
+			}
+			if txNumToUnwind > txNumInDB {
+				continue
+			}
+			if err = historyCursor.DeleteCurrent(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	historyCursorDupSort, ok := historyCursor.(kv.RwCursorDupSort)
+	if !ok {
+		return fmt.Errorf("expected DupSort cursor, got %T", historyCursor)
+	}
+
+	k := key
+	for v, err := historyCursorDupSort.SeekBothRange(key, txNumBytes); len(k) > 0; k, v, err = historyCursorDupSort.NextDup() {
+		if err != nil {
+			return err
+		}
+		if len(v) == 0 {
+			break
+		}
+		txNumInDB := binary.BigEndian.Uint64(v[:8])
+		if txNumToUnwind > txNumInDB {
+			continue
+		}
+		if err = historyCursorDupSort.DeleteCurrent(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (ht *HistoryRoTx) Close() {
 	if ht.files == nil { // invariant: it's safe to call Close multiple times
 		return
