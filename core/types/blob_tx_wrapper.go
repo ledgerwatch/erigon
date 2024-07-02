@@ -299,10 +299,11 @@ func (txw *BlobTxWrapper) GetFeeCap() *uint256.Int { return txw.Tx.GetFeeCap() }
 
 func (txw *BlobTxWrapper) GetBlobHashes() []libcommon.Hash { return txw.Tx.GetBlobHashes() }
 
-func (txw *BlobTxWrapper) GetGas() uint64            { return txw.Tx.GetGas() }
-func (txw *BlobTxWrapper) GetBlobGas() uint64        { return txw.Tx.GetBlobGas() }
-func (txw *BlobTxWrapper) GetValue() *uint256.Int    { return txw.Tx.GetValue() }
-func (txw *BlobTxWrapper) GetTo() *libcommon.Address { return txw.Tx.GetTo() }
+func (txw *BlobTxWrapper) GetGas() uint64                     { return txw.Tx.GetGas() }
+func (txw *BlobTxWrapper) GetBlobGas() uint64                 { return txw.Tx.GetBlobGas() }
+func (txw *BlobTxWrapper) GetValue() *uint256.Int             { return txw.Tx.GetValue() }
+func (txw *BlobTxWrapper) GetTo() *libcommon.Address          { return txw.Tx.GetTo() }
+func (txw *BlobTxWrapper) GetAuthorizations() []Authorization { return txw.Tx.GetAuthorizations() }
 
 func (txw *BlobTxWrapper) AsMessage(s Signer, baseFee *big.Int, rules *chain.Rules) (Message, error) {
 	return txw.Tx.AsMessage(s, baseFee, rules)
@@ -311,7 +312,7 @@ func (txw *BlobTxWrapper) WithSignature(signer Signer, sig []byte) (Transaction,
 	return txw.Tx.WithSignature(signer, sig)
 }
 
-func (txw *BlobTxWrapper) FakeSign(address libcommon.Address) (Transaction, error) {
+func (txw *BlobTxWrapper) FakeSign(address libcommon.Address) Transaction {
 	return txw.Tx.FakeSign(address)
 }
 
@@ -331,7 +332,7 @@ func (txw *BlobTxWrapper) RawSignatureValues() (*uint256.Int, *uint256.Int, *uin
 	return txw.Tx.RawSignatureValues()
 }
 
-func (txw *BlobTxWrapper) cashedSender() (libcommon.Address, bool) { return txw.Tx.cashedSender() }
+func (txw *BlobTxWrapper) cachedSender() (libcommon.Address, bool) { return txw.Tx.cachedSender() }
 
 func (txw *BlobTxWrapper) Sender(s Signer) (libcommon.Address, error) { return txw.Tx.Sender(s) }
 

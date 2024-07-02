@@ -94,6 +94,10 @@ func (ct *CommonTx) GetBlobHashes() []libcommon.Hash {
 	return []libcommon.Hash{}
 }
 
+func (ct *CommonTx) GetAuthorizations() []Authorization {
+	return nil
+}
+
 // LegacyTx is the transaction data of regular Ethereum transactions.
 type LegacyTx struct {
 	CommonTx
@@ -375,13 +379,13 @@ func (tx *LegacyTx) WithSignature(signer Signer, sig []byte) (Transaction, error
 	return cpy, nil
 }
 
-func (tx *LegacyTx) FakeSign(address libcommon.Address) (Transaction, error) {
+func (tx *LegacyTx) FakeSign(address libcommon.Address) Transaction {
 	cpy := tx.copy()
 	cpy.R.Set(u256.Num1)
 	cpy.S.Set(u256.Num1)
 	cpy.V.Set(u256.Num4)
 	cpy.from.Store(address)
-	return cpy, nil
+	return cpy
 }
 
 // Hash computes the hash (but not for signatures!)
@@ -434,7 +438,7 @@ func (tx *LegacyTx) GetChainID() *uint256.Int {
 	return DeriveChainId(&tx.V)
 }
 
-func (tx *LegacyTx) cashedSender() (sender libcommon.Address, ok bool) {
+func (tx *LegacyTx) cachedSender() (sender libcommon.Address, ok bool) {
 	s := tx.from.Load()
 	if s == nil {
 		return sender, false
