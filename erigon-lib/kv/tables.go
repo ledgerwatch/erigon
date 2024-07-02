@@ -541,7 +541,8 @@ var (
 	LightClientOptimisticUpdate = []byte("LightClientOptimisticUpdate")
 	LastNewBlockSeen            = []byte("LastNewBlockSeen") // last seen block hash
 
-	StatesProcessingKey = []byte("StatesProcessing")
+	StatesProcessingKey          = []byte("StatesProcessing")
+	MinimumPrunableStepDomainKey = []byte("MinimumPrunableStepDomainKey")
 )
 
 // ChaindataTables - list of all buckets. App will panic if some bucket is not in this list.
@@ -794,10 +795,12 @@ var ChaindataTablesCfg = TableCfg{
 	CallTraceSet: {Flags: DupSort},
 
 	TblAccountKeys:           {Flags: DupSort},
+	TblAccountVals:           {Flags: DupSort},
 	TblAccountHistoryKeys:    {Flags: DupSort},
 	TblAccountHistoryVals:    {Flags: DupSort},
 	TblAccountIdx:            {Flags: DupSort},
 	TblStorageKeys:           {Flags: DupSort},
+	TblStorageVals:           {Flags: DupSort},
 	TblStorageHistoryKeys:    {Flags: DupSort},
 	TblStorageHistoryVals:    {Flags: DupSort},
 	TblStorageIdx:            {Flags: DupSort},
@@ -805,6 +808,7 @@ var ChaindataTablesCfg = TableCfg{
 	TblCodeHistoryKeys:       {Flags: DupSort},
 	TblCodeIdx:               {Flags: DupSort},
 	TblCommitmentKeys:        {Flags: DupSort},
+	TblCommitmentVals:        {Flags: DupSort},
 	TblCommitmentHistoryKeys: {Flags: DupSort},
 	TblCommitmentHistoryVals: {Flags: DupSort},
 	TblCommitmentIdx:         {Flags: DupSort},

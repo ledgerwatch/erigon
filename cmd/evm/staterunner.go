@@ -21,9 +21,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/ledgerwatch/erigon/core/rawdb"
 	"os"
 	"path/filepath"
+
+	"github.com/ledgerwatch/erigon/core/rawdb"
 
 	"github.com/c2h5oh/datasize"
 	mdbx2 "github.com/erigontech/mdbx-go/mdbx"

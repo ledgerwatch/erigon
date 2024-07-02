@@ -67,7 +67,7 @@ func testDbAndDomainOfStep(t *testing.T, aggStep uint64, logger log.Logger) (kv.
 	db := mdbx.NewMDBX(logger).InMem(dirs.Chaindata).WithTableCfg(func(defaultBuckets kv.TableCfg) kv.TableCfg {
 		tcfg := kv.TableCfg{
 			keysTable:             kv.TableCfgItem{Flags: kv.DupSort},
-			valsTable:             kv.TableCfgItem{},
+			valsTable:             kv.TableCfgItem{Flags: kv.DupSort},
 			historyKeysTable:      kv.TableCfgItem{Flags: kv.DupSort},
 			historyValsTable:      kv.TableCfgItem{Flags: kv.DupSort},
 			settingsTable:         kv.TableCfgItem{},
@@ -83,7 +83,7 @@ func testDbAndDomainOfStep(t *testing.T, aggStep uint64, logger log.Logger) (kv.
 			iiCfg:             iiCfg{salt: &salt, dirs: dirs, db: db},
 			withLocalityIndex: false, withExistenceIndex: false, compression: CompressNone, historyLargeValues: true,
 		}}
-	d, err := NewDomain(cfg, aggStep, kv.AccountsDomain.String(), keysTable, valsTable, historyKeysTable, historyValsTable, indexTable, nil, logger)
+	d, err := NewDomain(cfg, aggStep, kv.AccountsDomain.String(), valsTable, historyKeysTable, historyValsTable, indexTable, nil, logger)
 	require.NoError(t, err)
 	d.DisableFsync()
 	d.compressWorkers = 1
@@ -1344,6 +1344,7 @@ func TestDomain_GetAfterAggregation(t *testing.T) {
 	d.historyLargeValues = false
 	d.History.compression = CompressKeys | CompressVals
 	d.compression = CompressKeys | CompressVals
+	d.filenameBase = kv.FileCommitmentDomain
 
 	dc := d.BeginFilesRo()
 	defer d.Close()
@@ -1414,6 +1415,7 @@ func TestDomain_CanPruneAfterAggregation(t *testing.T) {
 	d.historyLargeValues = false
 	d.History.compression = CompressKeys | CompressVals
 	d.compression = CompressKeys | CompressVals
+	d.filenameBase = kv.FileCommitmentDomain
 
 	dc := d.BeginFilesRo()
 	defer dc.Close()
@@ -1425,7 +1427,7 @@ func TestDomain_CanPruneAfterAggregation(t *testing.T) {
 	totalTx := uint64(5000)
 	keyTxsLimit := uint64(50)
 	keyLimit := uint64(200)
-
+	SaveExecV3PrunableProgress(tx, kv.MinimumPrunableStepDomainKey, 0)
 	// put some kvs
 	data := generateTestData(t, keySize1, keySize2, totalTx, keyTxsLimit, keyLimit)
 	for key, updates := range data {
@@ -1518,6 +1520,9 @@ func TestDomain_PruneAfterAggregation(t *testing.T) {
 	totalTx := uint64(5000)
 	keyTxsLimit := uint64(50)
 	keyLimit := uint64(200)
+
+	// Key's lengths are variable so lookup should be in commitment mode.
+	d.filenameBase = kv.FileCommitmentDomain
 
 	// put some kvs
 	data := generateTestData(t, keySize1, keySize2, totalTx, keyTxsLimit, keyLimit)
@@ -1703,11 +1708,11 @@ func TestDomain_PruneProgress(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	cancel()
 
-	key, err := GetExecV3PruneProgress(rwTx, dc.d.keysTable)
+	key, err := GetExecV3PruneProgress(rwTx, dc.d.valsTable)
 	require.NoError(t, err)
 	require.NotNil(t, key)
 
-	keysCursor, err := rwTx.RwCursorDupSort(dc.d.keysTable)
+	keysCursor, err := rwTx.RwCursorDupSort(dc.d.valsTable)
 	require.NoError(t, err)
 
 	k, istep, err := keysCursor.Seek(key)
@@ -1729,13 +1734,13 @@ func TestDomain_PruneProgress(t *testing.T) {
 		}
 		cancel()
 
-		key, err := GetExecV3PruneProgress(rwTx, dc.d.keysTable)
+		key, err := GetExecV3PruneProgress(rwTx, dc.d.valsTable)
 		require.NoError(t, err)
 		if step == 0 && key == nil {
 
 			fmt.Printf("pruned in %d iterations\n", i)
 
-			keysCursor, err := rwTx.RwCursorDupSort(dc.d.keysTable)
+			keysCursor, err := rwTx.RwCursorDupSort(dc.d.valsTable)
 			require.NoError(t, err)
 
 			// check there are no keys with 0 step left

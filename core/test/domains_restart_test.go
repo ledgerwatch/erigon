@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"github.com/ledgerwatch/erigon/core/rawdb"
 	"io/fs"
 	"math/big"
 	"math/rand"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ledgerwatch/erigon/core/rawdb"
 
 	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"

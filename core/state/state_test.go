@@ -19,8 +19,9 @@ package state
 import (
 	"bytes"
 	"context"
-	"github.com/ledgerwatch/erigon/core/rawdb"
 	"testing"
+
+	"github.com/ledgerwatch/erigon/core/rawdb"
 
 	"github.com/ledgerwatch/erigon-lib/common/datadir"
 	"github.com/ledgerwatch/erigon-lib/kv/temporal"

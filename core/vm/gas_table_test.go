@@ -19,10 +19,11 @@ package vm
 import (
 	"context"
 	"errors"
-	"github.com/ledgerwatch/erigon/core/rawdb"
 	"math"
 	"strconv"
 	"testing"
+
+	"github.com/ledgerwatch/erigon/core/rawdb"
 
 	"github.com/ledgerwatch/erigon-lib/common/hexutil"
 	"github.com/ledgerwatch/erigon-lib/kv"
