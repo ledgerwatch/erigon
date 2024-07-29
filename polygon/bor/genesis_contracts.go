@@ -17,8 +17,10 @@
 package bor
 
 import (
+	"bytes"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/erigontech/erigon-lib/log/v3"
 
@@ -26,6 +28,7 @@ import (
 	libcommon "github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon/accounts/abi"
 	"github.com/erigontech/erigon/consensus"
+	"github.com/erigontech/erigon/polygon/heimdall"
 	"github.com/erigontech/erigon/rlp"
 )
 
@@ -42,8 +45,35 @@ var (
 func GenesisContractValidatorSetABI() abi.ABI {
 	return validatorSetABI
 }
+
 func GenesisContractStateReceiverABI() abi.ABI {
 	return stateReceiverABI
+}
+
+var methodId []byte = stateReceiverABI.Methods["commitState"].ID
+
+func EventTime(encodedEvent rlp.RawValue) time.Time {
+	if bytes.Equal(methodId, encodedEvent[0:4]) {
+		return time.Unix((&big.Int{}).SetBytes(encodedEvent[4:36]).Int64(), 0)
+	}
+
+	return time.Time{}
+}
+
+var commitStateInputs = stateReceiverABI.Methods["commitState"].Inputs
+
+func EventId(encodedEvent rlp.RawValue) uint64 {
+	if bytes.Equal(methodId, encodedEvent[0:4]) {
+		args, _ := commitStateInputs.Unpack(encodedEvent[4:])
+
+		if len(args) == 2 {
+			var eventRecord heimdall.EventRecord
+			if err := rlp.DecodeBytes(args[1].([]byte), &eventRecord); err == nil {
+				return eventRecord.ID
+			}
+		}
+	}
+	return 0
 }
 
 type GenesisContracts interface {

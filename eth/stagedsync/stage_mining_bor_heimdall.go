@@ -94,6 +94,7 @@ func MiningBorHeimdallForward(
 		logger,
 		lastStateSyncEventID,
 	)
+
 	if err != nil {
 		return err
 	}
