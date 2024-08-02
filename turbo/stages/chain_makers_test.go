@@ -21,12 +21,13 @@ package stages_test
 
 import (
 	"fmt"
+	"math/big"
+	"testing"
+
 	libcommon "github.com/erigontech/erigon-lib/common"
 	protosentry "github.com/erigontech/erigon-lib/gointerfaces/sentryproto"
 	"github.com/erigontech/erigon/eth/protocols/eth"
 	"github.com/erigontech/erigon/rlp"
-	"math/big"
-	"testing"
 
 	"github.com/holiman/uint256"
 

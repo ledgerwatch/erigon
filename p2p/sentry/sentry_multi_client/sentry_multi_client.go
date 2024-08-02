@@ -27,9 +27,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/c2h5oh/datasize"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"golang.org/x/sync/semaphore"
+
+	"github.com/c2h5oh/datasize"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"

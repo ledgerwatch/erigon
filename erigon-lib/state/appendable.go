@@ -34,17 +34,16 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/erigontech/erigon-lib/common/assert"
-	"github.com/erigontech/erigon-lib/common/hexutility"
-	"github.com/erigontech/erigon-lib/kv/order"
-	"github.com/erigontech/erigon-lib/log/v3"
-	"github.com/erigontech/erigon-lib/seg"
-
 	"github.com/erigontech/erigon-lib/common/background"
 	"github.com/erigontech/erigon-lib/common/datadir"
 	"github.com/erigontech/erigon-lib/common/dir"
+	"github.com/erigontech/erigon-lib/common/hexutility"
 	"github.com/erigontech/erigon-lib/etl"
 	"github.com/erigontech/erigon-lib/kv"
+	"github.com/erigontech/erigon-lib/kv/order"
+	"github.com/erigontech/erigon-lib/log/v3"
 	"github.com/erigontech/erigon-lib/recsplit"
+	"github.com/erigontech/erigon-lib/seg"
 )
 
 // Appendable - data type allows store data for different blockchain forks.
@@ -128,22 +127,21 @@ func (ap *Appendable) fileNamesOnDisk() ([]string, error) {
 	return filesFromDir(ap.cfg.Dirs.SnapHistory)
 }
 
-func (ap *Appendable) openList(fNames []string, readonly bool) error {
+func (ap *Appendable) openList(fNames []string) error {
 	ap.closeWhatNotInList(fNames)
 	ap.scanDirtyFiles(fNames)
 	if err := ap.openDirtyFiles(); err != nil {
 		return fmt.Errorf("NewHistory.openDirtyFiles: %w, %s", err, ap.filenameBase)
 	}
-	_ = readonly // for future safety features. RPCDaemon must not delte files
 	return nil
 }
 
-func (ap *Appendable) openFolder(readonly bool) error {
+func (ap *Appendable) openFolder() error {
 	files, err := ap.fileNamesOnDisk()
 	if err != nil {
 		return err
 	}
-	return ap.openList(files, readonly)
+	return ap.openList(files)
 }
 
 func (ap *Appendable) scanDirtyFiles(fileNames []string) (garbageFiles []*filesItem) {
@@ -254,8 +252,6 @@ func (ap *Appendable) BuildMissedAccessors(ctx context.Context, g *errgroup.Grou
 }
 
 func (ap *Appendable) openDirtyFiles() error {
-	fmt.Printf("[dbg] dirtyFiles.Len() %d\n", ap.dirtyFiles.Len())
-
 	var invalidFileItems []*filesItem
 	invalidFileItemsLock := sync.Mutex{}
 	ap.dirtyFiles.Walk(func(items []*filesItem) bool {
@@ -368,7 +364,14 @@ func (tx *AppendableRoTx) Get(txnID kv.TxnId, dbtx kv.Tx) (v []byte, ok bool, er
 	if ok {
 		return v, true, nil
 	}
-	return tx.ap.getFromDBByTs(uint64(txnID), dbtx)
+	v, ok, err = tx.ap.getFromDBByTs(uint64(txnID), dbtx)
+	if err != nil {
+		return nil, false, err
+	}
+	if ok {
+		return v, true, nil
+	}
+	return nil, false, nil
 }
 func (tx *AppendableRoTx) Append(txnID kv.TxnId, v []byte, dbtx kv.RwTx) error {
 	return dbtx.Put(tx.ap.table, hexutility.EncodeTs(uint64(txnID)), v)
@@ -411,17 +414,6 @@ func (ap *Appendable) getFromDB(k []byte, dbtx kv.Tx) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	return v, v != nil, err
-}
-
-func (ap *Appendable) maxTxNumInDB(dbtx kv.Tx) (txNum uint64, err error) { //nolint
-	first, err := kv.LastKey(dbtx, ap.table)
-	if err != nil {
-		return 0, err
-	}
-	if len(first) == 0 {
-		return 0, nil
-	}
-	return binary.BigEndian.Uint64(first), nil
 }
 
 // Add - !NotThreadSafe. Must use WalRLock/BatchHistoryWriteEnd
@@ -493,6 +485,7 @@ func (ap *Appendable) BeginFilesRo() *AppendableRoTx {
 			files[i].src.refcount.Add(1)
 		}
 	}
+
 	return &AppendableRoTx{
 		ap:    ap,
 		files: files,
@@ -545,28 +538,48 @@ func (tx *AppendableRoTx) statelessGetter(i int) ArchiveGetter {
 	return r
 }
 
-func (tx *AppendableRoTx) mainTxNumInDB(dbtx kv.Tx) uint64 {
-	fst, _ := kv.FirstKey(dbtx, tx.ap.table)
-	if len(fst) > 0 {
-		fstInDb := binary.BigEndian.Uint64(fst)
-		return min(fstInDb, math.MaxUint64)
+func (tx *AppendableRoTx) maxTxnIDInDB(dbtx kv.Tx) (txNum kv.TxnId, ok bool) {
+	k, _ := kv.LastKey(dbtx, tx.ap.table)
+	if len(k) == 0 {
+		return 0, false
 	}
-	return math.MaxUint64
+	return kv.TxnId(binary.BigEndian.Uint64(k)), true
+}
+
+func (tx *AppendableRoTx) minTxnIDInDB(dbtx kv.Tx) (kv.TxnId, bool) {
+	k, _ := kv.FirstKey(dbtx, tx.ap.table)
+	if len(k) == 0 {
+		return 0, false
+	}
+	return kv.TxnId(binary.BigEndian.Uint64(k)), true
 }
 
 func (tx *AppendableRoTx) CanPrune(dbtx kv.Tx) bool {
-	return tx.mainTxNumInDB(dbtx) < tx.files.EndTxNum()
+	txnIDInDB, ok := tx.minTxnIDInDB(dbtx)
+	if !ok {
+		return false
+	}
+	_, txnIDInFiles, ok, _ := tx.ap.cfg.iters.TxNum2ID(dbtx, tx.files.EndTxNum())
+	if !ok {
+		return false
+	}
+	return txnIDInDB < txnIDInFiles
 }
-func (tx *AppendableRoTx) canBuild(dbtx kv.Tx) (bool, error) { //nolint
+
+func (tx *AppendableRoTx) canBuild(dbtx kv.Tx) bool { //nolint
 	//TODO: support "keep in db" parameter
 	//TODO: what if all files are pruned?
-	maxTxNumInDB, err := tx.ap.maxTxNumInDB(dbtx)
-	if err != nil {
-		return false, err
-	}
-	maxStepInDB := maxTxNumInDB / tx.ap.aggregationStep
 	maxStepInFiles := tx.files.EndTxNum() / tx.ap.aggregationStep
-	return maxStepInFiles < maxStepInDB, nil
+	txNumOfNextStep := (maxStepInFiles + 1) * tx.ap.aggregationStep
+	_, expectingTxnID, ok, _ := tx.ap.cfg.iters.TxNum2ID(dbtx, txNumOfNextStep)
+	if !ok {
+		return false
+	}
+	maxInDB, ok := tx.maxTxnIDInDB(dbtx)
+	if !ok {
+		return false
+	}
+	return expectingTxnID <= maxInDB
 }
 
 type AppendablePruneStat struct {
@@ -670,7 +683,7 @@ func (tx *AppendableRoTx) txNum2id(rwTx kv.RwTx, txFrom, txTo uint64) (fromID, t
 
 func (ap *Appendable) collate(ctx context.Context, step uint64, roTx kv.Tx) (AppendableCollation, error) {
 	stepTo := step + 1
-	txFrom, txTo := step*ap.aggregationStep, stepTo*ap.aggregationStep
+	fromTxNum, toTxNum := step*ap.aggregationStep, stepTo*ap.aggregationStep
 	start := time.Now()
 	defer mxCollateTookIndex.ObserveDuration(start)
 
@@ -692,7 +705,7 @@ func (ap *Appendable) collate(ctx context.Context, step uint64, roTx kv.Tx) (App
 	}
 	coll.writer = NewArchiveWriter(comp, ap.compression)
 
-	it, err := ap.cfg.iters.TxnIdsOfCanonicalBlocks(roTx, int(txFrom), int(txTo), order.Asc, -1)
+	it, err := ap.cfg.iters.TxnIdsOfCanonicalBlocks(roTx, int(fromTxNum), int(toTxNum), order.Asc, -1)
 	if err != nil {
 		return coll, fmt.Errorf("collate %s: %w", ap.filenameBase, err)
 	}
@@ -714,7 +727,6 @@ func (ap *Appendable) collate(ctx context.Context, step uint64, roTx kv.Tx) (App
 			return coll, fmt.Errorf("collate %s: %w", ap.filenameBase, err)
 		}
 	}
-
 	closeComp = false
 	return coll, nil
 }

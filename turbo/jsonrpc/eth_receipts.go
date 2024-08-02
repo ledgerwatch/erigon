@@ -21,8 +21,8 @@ import (
 	"fmt"
 
 	"github.com/RoaringBitmap/roaring"
-
 	"github.com/erigontech/erigon-lib/log/v3"
+	"github.com/erigontech/erigon/core/rawdb/rawtemporaldb"
 
 	"github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/kv"
@@ -263,7 +263,7 @@ func applyFiltersV3(tx kv.TemporalTx, begin, end uint64, crit filters.FilterCrit
 }
 
 func (api *BaseAPI) getLogsV3(ctx context.Context, tx kv.TemporalTx, begin, end uint64, crit filters.FilterCriteria) ([]*types.ErigonLog, error) {
-	logs := []*types.ErigonLog{}
+	logs := []*types.ErigonLog{} //nolint
 
 	addrMap := make(map[common.Address]struct{}, len(crit.Addresses))
 	for _, v := range crit.Addresses {
@@ -283,9 +283,10 @@ func (api *BaseAPI) getLogsV3(ctx context.Context, tx kv.TemporalTx, begin, end 
 	if err != nil {
 		return logs, err
 	}
+
+	var baseBlockTxnID kv.TxnId
 	it := rawdbv3.TxNums2BlockNums(tx, txNumbers, order.Asc)
 	defer it.Close()
-	var timestamp uint64
 	for it.HasNext() {
 		if err = ctx.Err(); err != nil {
 			return nil, err
@@ -309,8 +310,13 @@ func (api *BaseAPI) getLogsV3(ctx context.Context, tx kv.TemporalTx, begin, end 
 				continue
 			}
 			blockHash = header.Hash()
+
+			rrrr := rawdb.NewCanonicalReader()
+			baseBlockTxnID, err = rrrr.BaseTxnID(tx, blockNum, blockHash)
+			if err != nil {
+				return nil, err
+			}
 			exec.ChangeBlock(header)
-			timestamp = header.Time
 		}
 
 		//fmt.Printf("txNum=%d, blockNum=%d, txIndex=%d, maxTxNumInBlock=%d,mixTxNumInBlock=%d\n", txNum, blockNum, txIndex, maxTxNumInBlock, minTxNumInBlock)
@@ -327,19 +333,24 @@ func (api *BaseAPI) getLogsV3(ctx context.Context, tx kv.TemporalTx, begin, end 
 			return nil, err
 		}
 		rawLogs := exec.GetLogs(txIndex, txn)
-		//TODO: logIndex within the block! no way to calc it now
-		//logIndex := uint(0)
-		//for _, log := range rawLogs {
-		//	log.Index = logIndex
-		//	logIndex++
-		//}
-		filtered := rawLogs.Filter(addrMap, crit.Topics, 0)
-		for _, log := range filtered {
-			log.BlockNumber = blockNum
-			log.BlockHash = blockHash
-			log.TxHash = txn.Hash()
+
+		// `ReadReceipt` does fill `rawLogs` calulated fields. but we don't need it anymore.
+		r, err := rawtemporaldb.ReadReceipt(tx, baseBlockTxnID+kv.TxnId(txIndex), rawLogs, txIndex, blockHash, blockNum, txn)
+		if err != nil {
+			return nil, err
 		}
-		//TODO: maybe Logs by default and enreach them with
+		var filtered types.Logs
+		if r == nil { // if receipt data is not released yet. fallback to manual field filling. can remove in future.
+			filtered = rawLogs.Filter(addrMap, crit.Topics, 0)
+			for _, log := range filtered {
+				log.BlockNumber = blockNum
+				log.BlockHash = blockHash
+				log.TxHash = txn.Hash()
+			}
+		} else {
+			filtered = r.Logs
+		}
+
 		for _, filteredLog := range filtered {
 			logs = append(logs, &types.ErigonLog{
 				Address:     filteredLog.Address,
@@ -351,13 +362,11 @@ func (api *BaseAPI) getLogsV3(ctx context.Context, tx kv.TemporalTx, begin, end 
 				BlockHash:   filteredLog.BlockHash,
 				Index:       filteredLog.Index,
 				Removed:     filteredLog.Removed,
-				Timestamp:   timestamp,
+				Timestamp:   header.Time,
 			})
 		}
 	}
 
-	//stats := api._agg.GetAndResetStats()
-	//log.Info("Finished", "duration", time.Since(start), "history queries", stats.FilesQueries, "ef search duration", stats.EfSearchTime)
 	return logs, nil
 }
 

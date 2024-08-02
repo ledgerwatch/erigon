@@ -34,6 +34,7 @@ import (
 	"time"
 
 	datadir2 "github.com/erigontech/erigon-lib/common/datadir"
+	"github.com/erigontech/erigon-lib/common/hexutility"
 	"github.com/erigontech/erigon-lib/kv/order"
 	"github.com/erigontech/erigon-lib/kv/stream"
 	"github.com/erigontech/erigon-lib/log/v3"
@@ -2271,4 +2272,47 @@ func TestDomainContext_findShortenedKey(t *testing.T) {
 		require.NotNil(t, shortenedKey)
 		ki++
 	}
+}
+
+func TestCanBuild(t *testing.T) {
+	db, d := testDbAndDomain(t, log.New())
+	tx, err := db.BeginRw(context.Background())
+	require.NoError(t, err)
+	defer tx.Rollback()
+
+	d.historyLargeValues = true
+	dc := d.BeginFilesRo()
+	defer dc.Close()
+
+	dc.files = append(dc.files, visibleFile{startTxNum: 0, endTxNum: d.aggregationStep})
+
+	writer := dc.NewWriter()
+	defer writer.close()
+
+	k, v := []byte{1}, []byte{1}
+	// db has data which already in files
+	writer.SetTxNum(0)
+	_ = writer.PutWithPrev(k, nil, v, nil, 0)
+	_ = writer.Flush(context.Background(), tx)
+	canBuild := dc.canBuild(tx)
+	require.NoError(t, err)
+	require.False(t, canBuild)
+
+	// db has data which already in files and next step. still not enough - we need full step in db.
+	writer.SetTxNum(d.aggregationStep)
+	_ = writer.PutWithPrev(k, nil, v, nil, 0)
+	_ = writer.Flush(context.Background(), tx)
+	canBuild = dc.canBuild(tx)
+	require.NoError(t, err)
+	require.False(t, canBuild)
+	_ = writer.PutWithPrev(k, nil, v, nil, 0)
+
+	// db has: 1. data which already in files 2. full next step 3. a bit of next-next step. -> can build
+	writer.SetTxNum(d.aggregationStep * 2)
+	_ = writer.PutWithPrev(k, nil, v, nil, 0)
+	_ = writer.Flush(context.Background(), tx)
+	canBuild = dc.canBuild(tx)
+	require.NoError(t, err)
+	require.True(t, canBuild)
+	_ = writer.PutWithPrev(k, nil, hexutility.EncodeTs(d.aggregationStep*2+1), nil, 0)
 }
