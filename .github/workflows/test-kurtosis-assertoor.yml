@@ -1,0 +1,47 @@
+name: Kurtosis Assertoor GitHub Action
+
+on:
+  pull_request:
+    branches:
+      - kurtosis_assertoor
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  push:
+    branches:
+      - kurtosis_assertoor
+
+
+jobs:
+  assertoor_test:
+    strategy:
+      matrix:
+        # list of os: https://github.com/actions/virtual-environments
+        os:
+          - { id: ubuntu-22.04, name: ubuntu } 
+          #- macos-14
+    runs-on: ${{ matrix.os.id }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create a temporary file
+        run: |
+          echo "This is a temporary file" > ${{ runner.temp }}/tempfile.txt
+
+      - name: Install dependencies on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt update && sudo apt install build-essential
+
+      - name: download kurtosis config
+        run: |
+          wget -O kurtosis_config.yaml https://raw.githubusercontent.com/erigontech/erigon/kurtosis_assertoor/.github/workflows/kurtosis/config.yaml
+
+      - name: Run Kurtosis + assertoor tests
+        uses: ethpandaops/kurtosis-assertoor-github-action@v1
+        with:
+            enclave_name: "kurtosis-run-${{ matrix.os.name }}-${{ github.run_id }}"
+            ethereum_package_args: "./kurtosis_config.yaml"
+            #kurtosis_extra_args: --verbosity detailed --cli-log-level trace
+            enclave_dump: false
