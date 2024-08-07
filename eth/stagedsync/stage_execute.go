@@ -130,7 +130,7 @@ func StageExecuteBlocksCfg(
 
 // ================ Erigon3 ================
 
-func ExecBlockV3(s *StageState, u Unwinder, txc wrap.TxContainer, toBlock uint64, ctx context.Context, cfg ExecuteBlockCfg, initialCycle bool, logger log.Logger) (err error) {
+func ExecBlockV3(s *StageState, u Unwinder, txc wrap.TxContainer, toBlock uint64, ctx context.Context, cfg ExecuteBlockCfg, initialCycle bool, logger log.Logger, isMining bool) (err error) {
 	workersCount := cfg.syncCfg.ExecWorkerCount
 	if !initialCycle {
 		workersCount = 1
@@ -150,7 +150,7 @@ func ExecBlockV3(s *StageState, u Unwinder, txc wrap.TxContainer, toBlock uint64
 	}
 
 	parallel := txc.Tx == nil
-	if err := ExecV3(ctx, s, u, workersCount, cfg, txc, parallel, to, logger, initialCycle); err != nil {
+	if err := ExecV3(ctx, s, u, workersCount, cfg, txc, parallel, to, logger, initialCycle, isMining); err != nil {
 		return err
 	}
 	return nil
@@ -237,7 +237,7 @@ func SpawnExecuteBlocksStage(s *StageState, u Unwinder, txc wrap.TxContainer, to
 	if dbg.StagesOnlyBlocks {
 		return nil
 	}
-	if err = ExecBlockV3(s, u, txc, toBlock, ctx, cfg, s.CurrentSyncCycle.IsInitialCycle, logger); err != nil {
+	if err = ExecBlockV3(s, u, txc, toBlock, ctx, cfg, s.CurrentSyncCycle.IsInitialCycle, logger, false); err != nil {
 		return err
 	}
 	return nil
@@ -305,7 +305,7 @@ func blocksReadAheadFunc(ctx context.Context, tx kv.Tx, cfg *ExecuteBlockCfg, bl
 }
 
 func UnwindExecutionStage(u *UnwindState, s *StageState, txc wrap.TxContainer, ctx context.Context, cfg ExecuteBlockCfg, logger log.Logger) (err error) {
-	//fmt.Printf("unwind: %d -> %d\n", u.CurrentBlockNumber, u.UnwindPoint)
+	fmt.Printf("unwind: %d -> %d, %T, %T\n", u.CurrentBlockNumber, u.UnwindPoint, txc.Tx, txc.Doms)
 	if u.UnwindPoint >= s.BlockNumber {
 		return nil
 	}

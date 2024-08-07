@@ -169,6 +169,7 @@ func ExecV3(ctx context.Context,
 	maxBlockNum uint64,
 	logger log.Logger,
 	initialCycle bool,
+	isMining bool,
 ) error {
 	// TODO: e35 doesn't support parallel-exec yet
 	parallel = false //nolint
@@ -356,7 +357,7 @@ func ExecV3(ctx context.Context,
 	rwsConsumed := make(chan struct{}, 1)
 	defer close(rwsConsumed)
 
-	execWorkers, applyWorker, rws, stopWorkers, waitWorkers := exec3.NewWorkersPool(lock.RLocker(), accumulator, logger, ctx, parallel, chainDb, rs, in, blockReader, chainConfig, genesis, engine, workerCount+1, cfg.dirs)
+	execWorkers, applyWorker, rws, stopWorkers, waitWorkers := exec3.NewWorkersPool(lock.RLocker(), accumulator, logger, ctx, parallel, chainDb, rs, in, blockReader, chainConfig, genesis, engine, workerCount+1, cfg.dirs, isMining)
 	defer stopWorkers()
 	applyWorker.DiscardReadList()
 
@@ -386,7 +387,7 @@ func ExecV3(ctx context.Context,
 				return err
 			}
 
-			processedTxNum, conflicts, triggers, processedBlockNum, stoppedAtBlockEnd, err := processResultQueue(ctx, in, rws, outputTxNum.Load(), rs, agg, tx, rwsConsumed, applyWorker, true, false)
+			processedTxNum, conflicts, triggers, processedBlockNum, stoppedAtBlockEnd, err := processResultQueue(ctx, in, rws, outputTxNum.Load(), rs, agg, tx, rwsConsumed, applyWorker, true, false, isMining)
 			if err != nil {
 				return err
 			}
@@ -488,7 +489,7 @@ func ExecV3(ctx context.Context,
 							rws.DrainNonBlocking()
 							applyWorker.ResetTx(tx)
 
-							processedTxNum, conflicts, triggers, processedBlockNum, stoppedAtBlockEnd, err := processResultQueue(ctx, in, rws, outputTxNum.Load(), rs, agg, tx, nil, applyWorker, false, true)
+							processedTxNum, conflicts, triggers, processedBlockNum, stoppedAtBlockEnd, err := processResultQueue(ctx, in, rws, outputTxNum.Load(), rs, agg, tx, nil, applyWorker, false, true, isMining)
 							if err != nil {
 								return err
 							}
@@ -796,7 +797,7 @@ Loop:
 			if txTask.Error != nil {
 				break Loop
 			}
-			applyWorker.RunTxTaskNoLock(txTask)
+			applyWorker.RunTxTaskNoLock(txTask, isMining)
 			if err := func() error {
 				if errors.Is(txTask.Error, context.Canceled) {
 					return err
@@ -809,7 +810,7 @@ Loop:
 					blobGasUsed += txTask.Tx.GetBlobGas()
 				}
 				if txTask.Final {
-					checkReceipts := !cfg.vmConfig.StatelessExec && chainConfig.IsByzantium(txTask.BlockNum) && !cfg.vmConfig.NoReceipts
+					checkReceipts := !cfg.vmConfig.StatelessExec && chainConfig.IsByzantium(txTask.BlockNum) && !cfg.vmConfig.NoReceipts && !isMining
 					if txTask.BlockNum > 0 && !skipPostEvaluation { //Disable check for genesis. Maybe need somehow improve it in future - to satisfy TestExecutionSpec
 						if err := core.BlockPostValidation(usedGas, blobGasUsed, checkReceipts, receipts, txTask.Header); err != nil {
 							return fmt.Errorf("%w, txnIdx=%d, %v", consensus.ErrInvalidBlock, txTask.TxIndex, err) //same as in stage_exec.go
@@ -833,12 +834,17 @@ Loop:
 					return err
 				}
 				if errors.Is(err, consensus.ErrInvalidBlock) {
-					if err := u.UnwindTo(blockNum-1, BadBlock(header.Hash(), err), applyTx); err != nil {
-						return err
+					fmt.Printf("[dbg] in unwindTo %T\n", applyTx)
+					if u != nil {
+						if err := u.UnwindTo(blockNum-1, BadBlock(header.Hash(), err), applyTx); err != nil {
+							return err
+						}
 					}
 				} else {
-					if err := u.UnwindTo(blockNum-1, ExecUnwind, applyTx); err != nil {
-						return err
+					if u != nil {
+						if err := u.UnwindTo(blockNum-1, ExecUnwind, applyTx); err != nil {
+							return err
+						}
 					}
 				}
 				break Loop
@@ -905,7 +911,7 @@ Loop:
 					t1, t2, t3 time.Duration
 				)
 
-				if ok, err := flushAndCheckCommitmentV3(ctx, b.HeaderNoCopy(), applyTx, doms, cfg, execStage, stageProgress, parallel, logger, u, inMemExec); err != nil {
+				if ok, err := flushAndCheckCommitmentV3(ctx, b.HeaderNoCopy(), applyTx, doms, cfg, execStage, stageProgress, parallel, logger, u, inMemExec, isMining); err != nil {
 					return err
 				} else if !ok {
 					break Loop
@@ -991,7 +997,7 @@ Loop:
 
 	if u != nil && !u.HasUnwindPoint() {
 		if b != nil {
-			_, err := flushAndCheckCommitmentV3(ctx, b.HeaderNoCopy(), applyTx, doms, cfg, execStage, stageProgress, parallel, logger, u, inMemExec)
+			_, err := flushAndCheckCommitmentV3(ctx, b.HeaderNoCopy(), applyTx, doms, cfg, execStage, stageProgress, parallel, logger, u, inMemExec, isMining)
 			if err != nil {
 				return err
 			}
@@ -1065,7 +1071,7 @@ func dumpPlainStateDebug(tx kv.RwTx, doms *state2.SharedDomains) {
 }
 
 // flushAndCheckCommitmentV3 - does write state to db and then check commitment
-func flushAndCheckCommitmentV3(ctx context.Context, header *types.Header, applyTx kv.RwTx, doms *state2.SharedDomains, cfg ExecuteBlockCfg, e *StageState, maxBlockNum uint64, parallel bool, logger log.Logger, u Unwinder, inMemExec bool) (bool, error) {
+func flushAndCheckCommitmentV3(ctx context.Context, header *types.Header, applyTx kv.RwTx, doms *state2.SharedDomains, cfg ExecuteBlockCfg, e *StageState, maxBlockNum uint64, parallel bool, logger log.Logger, u Unwinder, inMemExec bool, isMining bool) (bool, error) {
 
 	// E2 state root check was in another stage - means we did flush state even if state root will not match
 	// And Unwind expecting it
@@ -1077,6 +1083,11 @@ func flushAndCheckCommitmentV3(ctx context.Context, header *types.Header, applyT
 			return false, fmt.Errorf("writing plain state version: %w", err)
 		}
 	}
+
+	if header == nil {
+		return false, fmt.Errorf("header is nil")
+	}
+
 	if dbg.DiscardCommitment() {
 		return true, nil
 	}
@@ -1091,7 +1102,7 @@ func flushAndCheckCommitmentV3(ctx context.Context, header *types.Header, applyT
 	if cfg.blockProduction {
 		return true, nil
 	}
-	if bytes.Equal(rh, header.Root.Bytes()) {
+	if isMining || bytes.Equal(rh, header.Root.Bytes()) {
 		if !inMemExec {
 			if err := doms.Flush(ctx, applyTx); err != nil {
 				return false, err
@@ -1161,7 +1172,7 @@ func blockWithSenders(ctx context.Context, db kv.RoDB, tx kv.Tx, blockReader ser
 	return b, err
 }
 
-func processResultQueue(ctx context.Context, in *state.QueueWithRetry, rws *state.ResultsQueue, outputTxNumIn uint64, rs *state.StateV3, agg *state2.Aggregator, applyTx kv.Tx, backPressure chan struct{}, applyWorker *exec3.Worker, canRetry, forceStopAtBlockEnd bool) (outputTxNum uint64, conflicts, triggers int, processedBlockNum uint64, stopedAtBlockEnd bool, err error) {
+func processResultQueue(ctx context.Context, in *state.QueueWithRetry, rws *state.ResultsQueue, outputTxNumIn uint64, rs *state.StateV3, agg *state2.Aggregator, applyTx kv.Tx, backPressure chan struct{}, applyWorker *exec3.Worker, canRetry, forceStopAtBlockEnd bool, isMining bool) (outputTxNum uint64, conflicts, triggers int, processedBlockNum uint64, stopedAtBlockEnd bool, err error) {
 	rwsIt := rws.Iter()
 	defer rwsIt.Close()
 
@@ -1179,7 +1190,7 @@ func processResultQueue(ctx context.Context, in *state.QueueWithRetry, rws *stat
 			}
 
 			// resolve first conflict right here: it's faster and conflict-free
-			applyWorker.RunTxTask(txTask)
+			applyWorker.RunTxTask(txTask, isMining)
 			if txTask.Error != nil {
 				return outputTxNum, conflicts, triggers, processedBlockNum, false, fmt.Errorf("%w: %v", consensus.ErrInvalidBlock, txTask.Error)
 			}

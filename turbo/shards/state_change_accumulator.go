@@ -18,10 +18,12 @@ package shards
 
 import (
 	"context"
+	"github.com/erigontech/erigon-lib/common/dbg"
 
 	libcommon "github.com/erigontech/erigon-lib/common"
 	"github.com/erigontech/erigon-lib/gointerfaces"
 	remote "github.com/erigontech/erigon-lib/gointerfaces/remoteproto"
+	"github.com/erigontech/erigon-lib/log/v3"
 )
 
 // Accumulator collects state changes in a form that can then be delivered to the RPC daemon
@@ -54,6 +56,11 @@ func (a *Accumulator) SendAndReset(ctx context.Context, c StateChangeConsumer, p
 		return
 	}
 	sc := &remote.StateChangeBatch{StateVersionId: a.plainStateID, ChangeBatch: a.changes, PendingBlockBaseFee: pendingBaseFee, BlockGasLimit: blockGasLimit, FinalizedBlock: finalizedBlock, PendingBlobFeePerGas: pendingBlobFee}
+	println("reseting")
+	for _, change := range a.changes {
+		println("txs", len(change.Txs))
+	}
+	println("---------------------------------------------")
 	c.SendStateChanges(ctx, sc)
 	a.Reset(0) // reset here for GC, but there will be another Reset with correct viewID
 }
@@ -64,6 +71,7 @@ func (a *Accumulator) SetStateID(stateID uint64) {
 
 // StartChange begins accumulation of changes for a new block
 func (a *Accumulator) StartChange(blockHeight uint64, blockHash libcommon.Hash, txs [][]byte, unwind bool) {
+	log.Warn("[dbg] StartChange", "blockHeight", blockHeight, "txs", len(txs), "stack", dbg.Stack())
 	a.changes = append(a.changes, &remote.StateChange{})
 	a.latestChange = a.changes[len(a.changes)-1]
 	a.latestChange.BlockHeight = blockHeight
