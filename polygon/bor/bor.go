@@ -1048,10 +1048,6 @@ func (c *Bor) Finalize(config *chain.Config, header *types.Header, state *state.
 		return nil, types.Receipts{}, nil, err
 	}
 
-	// No block rewards in PoA, so the state remains as is and uncles are dropped
-	// header.Root = state.IntermediateRoot(chain.Config().IsSpuriousDragon(header.Number.Uint64()))
-	header.UncleHash = types.CalcUncleHash(nil)
-
 	// Set state sync data to blockchain
 	// bc := chain.(*core.BlockChain)
 	// bc.SetStateSync(stateSyncData)
@@ -1153,7 +1149,7 @@ func (c *Bor) Authorize(currentSigner libcommon.Address, signFn SignerFn) {
 // Seal implements consensus.Engine, attempting to create a sealed block using
 // the local signing credentials.
 func (c *Bor) Seal(chain consensus.ChainHeaderReader, block *types.Block, results chan<- *types.Block, stop <-chan struct{}) error {
-	header := block.Header()
+	header := block.HeaderNoCopy()
 	// Sealing the genesis block is not supported
 	number := header.Number.Uint64()
 
