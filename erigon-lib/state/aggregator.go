@@ -162,7 +162,7 @@ func NewAggregator(ctx context.Context, dirs datadir.Dirs, aggregationStep uint6
 			iiCfg:             iiCfg{salt: salt, dirs: dirs, db: db},
 			withLocalityIndex: false, withExistenceIndex: false, compression: CompressNone, historyLargeValues: false,
 		},
-		restrictSubsetFileDeletions: a.commitmentValuesTransform,
+		// restrictSubsetFileDeletions: a.commitmentValuesTransform,
 	}
 	if a.d[kv.AccountsDomain], err = NewDomain(cfg, aggregationStep, kv.AccountsDomain, kv.TblAccountVals, kv.TblAccountHistoryKeys, kv.TblAccountHistoryVals, kv.TblAccountIdx, integrityCheck, logger); err != nil {
 		return nil, err
@@ -172,7 +172,7 @@ func NewAggregator(ctx context.Context, dirs datadir.Dirs, aggregationStep uint6
 			iiCfg:             iiCfg{salt: salt, dirs: dirs, db: db},
 			withLocalityIndex: false, withExistenceIndex: false, compression: CompressNone, historyLargeValues: false,
 		},
-		restrictSubsetFileDeletions: a.commitmentValuesTransform,
+		// restrictSubsetFileDeletions: a.commitmentValuesTransform,
 	}
 	if a.d[kv.StorageDomain], err = NewDomain(cfg, aggregationStep, kv.StorageDomain, kv.TblStorageVals, kv.TblStorageHistoryKeys, kv.TblStorageHistoryVals, kv.TblStorageIdx, integrityCheck, logger); err != nil {
 		return nil, err
@@ -193,9 +193,9 @@ func NewAggregator(ctx context.Context, dirs datadir.Dirs, aggregationStep uint6
 			withLocalityIndex: false, withExistenceIndex: false, compression: CompressNone, historyLargeValues: false,
 			snapshotsDisabled: true,
 		},
-		replaceKeysInValues:         a.commitmentValuesTransform,
-		restrictSubsetFileDeletions: a.commitmentValuesTransform,
-		compress:                    CompressNone,
+		replaceKeysInValues: a.commitmentValuesTransform,
+		// restrictSubsetFileDeletions: a.commitmentValuesTransform,
+		compress: CompressNone,
 	}
 	if a.d[kv.CommitmentDomain], err = NewDomain(cfg, aggregationStep, kv.CommitmentDomain, kv.TblCommitmentVals, kv.TblCommitmentHistoryKeys, kv.TblCommitmentHistoryVals, kv.TblCommitmentIdx, integrityCheck, logger); err != nil {
 		return nil, err
@@ -1699,7 +1699,7 @@ func (ac *AggregatorRoTx) mergeFiles(ctx context.Context, files SelectedStaticFi
 		g.Go(func() (err error) {
 			var vt valueTransformer
 			if ac.a.commitmentValuesTransform && kid == kv.CommitmentDomain {
-				ac.RestrictSubsetFileDeletions(true)
+				// ac.RestrictSubsetFileDeletions(true)
 				accStorageMerged.Wait()
 
 				vt, err = ac.d[kv.CommitmentDomain].commitmentValTransformDomain(r.domain[kid].values, ac.d[kv.AccountsDomain], ac.d[kv.StorageDomain],
@@ -1715,9 +1715,10 @@ func (ac *AggregatorRoTx) mergeFiles(ctx context.Context, files SelectedStaticFi
 				if kid == kv.AccountsDomain || kid == kv.StorageDomain {
 					accStorageMerged.Done()
 				}
-				if err == nil && kid == kv.CommitmentDomain {
-					ac.RestrictSubsetFileDeletions(false)
-				}
+				// todo  files protected because they are not inserted, is it enough here?
+				// if err == nil && kid == kv.CommitmentDomain {
+				// 	ac.RestrictSubsetFileDeletions(false)
+				// }
 			}
 			return err
 		})
