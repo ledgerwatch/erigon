@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/RoaringBitmap/roaring/roaring64"
+	"github.com/elastic/go-freelru"
 	"github.com/spaolacci/murmur3"
 	btree2 "github.com/tidwall/btree"
 	"golang.org/x/sync/errgroup"
@@ -529,6 +530,12 @@ type InvertedIndexRoTx struct {
 	files   visibleFiles
 	getters []ArchiveGetter
 	readers []*recsplit.IndexReader
+
+	hit, miss       int
+	iiNotFoundCache *freelru.LRU[uint64, r]
+}
+type r struct {
+	requested, found uint64
 }
 
 // hashKey - change of salt will require re-gen of indices
@@ -566,8 +573,39 @@ func (iit *InvertedIndexRoTx) seekInFiles(key []byte, txNum uint64) (found bool,
 	if len(iit.files) == 0 {
 		return false, 0
 	}
+	if iit.files[len(iit.files)-1].endTxNum <= txNum {
+		return false, 0
+	}
 
 	hi, lo := iit.hashKey(key)
+
+	const limit = 512
+	if iit.iiNotFoundCache == nil {
+		var err error
+		iit.iiNotFoundCache, err = freelru.New[uint64, r](limit, u64noHash)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	//if dbg.KVReadLevelledMetrics {
+	//	m := iit.iiNotFoundCache.Metrics()
+	//	if iit.hit%10_000 == 0 {
+	//		log.Warn("[dbg] lEachCache", "a", iit.ii.filenameBase, "hit", iit.hit, "total", iit.hit+iit.miss, "Collisions", m.Collisions, "Evictions", m.Evictions, "Inserts", m.Inserts, "limit", limit, "ratio", fmt.Sprintf("%.2f", float64(m.Hits)/float64(m.Hits+m.Misses)))
+	//	}
+	//}
+
+	fromCache, ok := iit.iiNotFoundCache.Get(hi)
+	if ok && fromCache.requested <= txNum {
+		if txNum <= fromCache.found {
+			iit.hit++
+			return true, fromCache.found
+		} else if fromCache.found == 0 {
+			iit.hit++
+			return false, 0
+		}
+	}
+	iit.miss++
 
 	for i := 0; i < len(iit.files); i++ {
 		if iit.files[i].endTxNum <= txNum {
@@ -588,9 +626,12 @@ func (iit *InvertedIndexRoTx) seekInFiles(key []byte, txNum uint64) (found bool,
 		equalOrHigherTxNum, found = eliasfano32.Seek(eliasVal, txNum)
 
 		if found {
+			iit.iiNotFoundCache.Add(hi, r{requested: txNum, found: equalOrHigherTxNum})
 			return true, equalOrHigherTxNum
 		}
 	}
+
+	iit.iiNotFoundCache.Add(hi, r{requested: txNum, found: 0})
 	return false, 0
 }
 
