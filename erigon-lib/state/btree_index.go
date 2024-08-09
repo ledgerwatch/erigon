@@ -893,12 +893,12 @@ func (b *BtIndex) keyCmp(k []byte, di uint64, g ArchiveGetter) (int, []byte, err
 		return 0, nil, fmt.Errorf("key at %d/%d not found, file: %s", di, b.ef.Count(), b.FileName())
 	}
 
+	cmp := g.MatchCmp(k)
+	g.Reset(offset)
 	var res []byte
 	res, _ = g.Next(res[:0])
 
-	//TODO: use `b.getter.Match` after https://github.com/erigontech/erigon/issues/7855
-	return bytes.Compare(res, k), res, nil
-	//return b.getter.Match(k), result, nil
+	return -1 * cmp, res, nil
 }
 
 // getter should be alive all the time of cursor usage
