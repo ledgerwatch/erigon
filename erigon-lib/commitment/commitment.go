@@ -112,56 +112,28 @@ const (
 	AccountPlainPart PartFlags = 2
 	StoragePlainPart PartFlags = 4
 	HashPart         PartFlags = 8
+	LeafHashPart     PartFlags = 16
 )
 
-type BranchData []byte
-
-func (branchData BranchData) String() string {
-	if len(branchData) == 0 {
-		return ""
-	}
-	touchMap := binary.BigEndian.Uint16(branchData[0:])
-	afterMap := binary.BigEndian.Uint16(branchData[2:])
-	pos := 4
+func (p PartFlags) String() string {
 	var sb strings.Builder
-	var cell cell
-	fmt.Fprintf(&sb, "touchMap %016b, afterMap %016b\n", touchMap, afterMap)
-	for bitset, j := touchMap, 0; bitset != 0; j++ {
-		bit := bitset & -bitset
-		nibble := bits.TrailingZeros16(bit)
-		fmt.Fprintf(&sb, "   %x => ", nibble)
-		if afterMap&bit == 0 {
-			sb.WriteString("{DELETED}\n")
-		} else {
-			fieldBits := PartFlags(branchData[pos])
-			pos++
-			var err error
-			if pos, err = cell.fillFromFields(branchData, pos, fieldBits); err != nil {
-				// This is used for test output, so ok to panic
-				panic(err)
-			}
-			sb.WriteString("{")
-			var comma string
-			if cell.downHashedLen > 0 {
-				fmt.Fprintf(&sb, "hashedKey=[%x]", cell.downHashedKey[:cell.downHashedLen])
-				comma = ","
-			}
-			if cell.accountPlainKeyLen > 0 {
-				fmt.Fprintf(&sb, "%saccountPlainKey=[%x]", comma, cell.accountPlainKey[:cell.accountPlainKeyLen])
-				comma = ","
-			}
-			if cell.storagePlainKeyLen > 0 {
-				fmt.Fprintf(&sb, "%sstoragePlainKey=[%x]", comma, cell.storagePlainKey[:cell.storagePlainKeyLen])
-				comma = ","
-			}
-			if cell.hashLen > 0 {
-				fmt.Fprintf(&sb, "%shash=[%x]", comma, cell.hash[:cell.hashLen])
-			}
-			sb.WriteString("}\n")
-		}
-		bitset ^= bit
+	if p&HashedKeyPart != 0 {
+		sb.WriteString("DownHash")
+	}
+	if p&AccountPlainPart != 0 {
+		sb.WriteString("+AccountPlain")
+	}
+	if p&StoragePlainPart != 0 {
+		sb.WriteString("+StoragePlain")
+	}
+	if p&HashPart != 0 {
+		sb.WriteString("+Hash")
+	}
+	if p&LeafHashPart != 0 {
+		sb.WriteString("+LeafHash")
 	}
 	return sb.String()
+
 }
 
 type BranchEncoder struct {
@@ -186,8 +158,9 @@ func (be *BranchEncoder) initCollector() {
 	if be.updates != nil {
 		be.updates.Close()
 	}
-	be.updates = etl.NewCollector("commitment.BranchEncoder", be.tmpdir, etl.NewOldestEntryBuffer(etl.BufferOptimalSize/2), log.Root().New("branch-encoder"))
+	be.updates = etl.NewCollector("commitment.BranchEncoder", be.tmpdir, etl.NewOldestEntryBuffer(etl.BufferOptimalSize/4), log.Root().New("branch-encoder"))
 	be.updates.LogLvl(log.LvlDebug)
+	be.updates.SortAndFlushInBackground(true)
 }
 
 func (be *BranchEncoder) Load(pc PatriciaContext, args etl.TransformArgs) error {
@@ -299,17 +272,20 @@ func (be *BranchEncoder) EncodeBranch(bitmap, touchMap, afterMap uint16, readCel
 
 		if bitmap&bit != 0 {
 			var fieldBits PartFlags
-			if cell.extLen > 0 && cell.storagePlainKeyLen == 0 {
+			if cell.extLen > 0 && cell.storageAddrLen == 0 {
 				fieldBits |= HashedKeyPart
 			}
-			if cell.accountPlainKeyLen > 0 {
+			if cell.accountAddrLen > 0 {
 				fieldBits |= AccountPlainPart
 			}
-			if cell.storagePlainKeyLen > 0 {
+			if cell.storageAddrLen > 0 {
 				fieldBits |= StoragePlainPart
 			}
 			if cell.hashLen > 0 {
 				fieldBits |= HashPart
+			}
+			if cell.lhLen > 0 && (cell.accountAddrLen > 0 || cell.storageAddrLen > 0) {
+				fieldBits |= LeafHashPart
 			}
 			if err := be.buf.WriteByte(byte(fieldBits)); err != nil {
 				return nil, 0, err
@@ -320,17 +296,23 @@ func (be *BranchEncoder) EncodeBranch(bitmap, touchMap, afterMap uint16, readCel
 				}
 			}
 			if fieldBits&AccountPlainPart != 0 {
-				if err := putUvarAndVal(uint64(cell.accountPlainKeyLen), cell.accountPlainKey[:cell.accountPlainKeyLen]); err != nil {
+				if err := putUvarAndVal(uint64(cell.accountAddrLen), cell.accountAddr[:cell.accountAddrLen]); err != nil {
 					return nil, 0, err
 				}
 			}
 			if fieldBits&StoragePlainPart != 0 {
-				if err := putUvarAndVal(uint64(cell.storagePlainKeyLen), cell.storagePlainKey[:cell.storagePlainKeyLen]); err != nil {
+				if err := putUvarAndVal(uint64(cell.storageAddrLen), cell.storageAddr[:cell.storageAddrLen]); err != nil {
 					return nil, 0, err
 				}
 			}
 			if fieldBits&HashPart != 0 {
 				if err := putUvarAndVal(uint64(cell.hashLen), cell.hash[:cell.hashLen]); err != nil {
+					return nil, 0, err
+				}
+			}
+			if fieldBits&LeafHashPart != 0 {
+				//fmt.Printf("LH encoded %x\n", cell.leafHash[:cell.lhLen])
+				if err := putUvarAndVal(uint64(cell.lhLen), cell.leafHash[:cell.lhLen]); err != nil {
 					return nil, 0, err
 				}
 			}
@@ -342,6 +324,59 @@ func (be *BranchEncoder) EncodeBranch(bitmap, touchMap, afterMap uint16, readCel
 }
 
 func RetrieveCellNoop(nibble int, skip bool) (*cell, error) { return nil, nil }
+
+type BranchData []byte
+
+func (branchData BranchData) String() string {
+	if len(branchData) == 0 {
+		return ""
+	}
+	touchMap := binary.BigEndian.Uint16(branchData[0:])
+	afterMap := binary.BigEndian.Uint16(branchData[2:])
+	pos := 4
+	var sb strings.Builder
+	var cell cell
+	fmt.Fprintf(&sb, "touchMap %016b, afterMap %016b\n", touchMap, afterMap)
+	for bitset, j := touchMap, 0; bitset != 0; j++ {
+		bit := bitset & -bitset
+		nibble := bits.TrailingZeros16(bit)
+		fmt.Fprintf(&sb, "   %x => ", nibble)
+		if afterMap&bit == 0 {
+			sb.WriteString("{DELETED}\n")
+		} else {
+			fieldBits := PartFlags(branchData[pos])
+			pos++
+			var err error
+			if pos, err = cell.fillFromFields(branchData, pos, fieldBits); err != nil {
+				// This is used for test output, so ok to panic
+				panic(err)
+			}
+			sb.WriteString("{")
+			var comma string
+			if cell.hashedExtLen > 0 {
+				fmt.Fprintf(&sb, "hashedExtension=[%x]", cell.hashedExtension[:cell.hashedExtLen])
+				comma = ","
+			}
+			if cell.accountAddrLen > 0 {
+				fmt.Fprintf(&sb, "%saccountAddr=[%x]", comma, cell.accountAddr[:cell.accountAddrLen])
+				comma = ","
+			}
+			if cell.storageAddrLen > 0 {
+				fmt.Fprintf(&sb, "%sstorageAddr=[%x]", comma, cell.storageAddr[:cell.storageAddrLen])
+				comma = ","
+			}
+			if cell.hashLen > 0 {
+				fmt.Fprintf(&sb, "%shash=[%x]", comma, cell.hash[:cell.hashLen])
+			}
+			if cell.lhLen > 0 {
+				fmt.Fprintf(&sb, "%sleafHash=[%x]", comma, cell.leafHash[:cell.lhLen])
+			}
+			sb.WriteString("}\n")
+		}
+		bitset ^= bit
+	}
+	return sb.String()
+}
 
 // if fn returns nil, the original key will be copied from branchData
 func (branchData BranchData) ReplacePlainKeys(newData []byte, fn func(key []byte, isStorage bool) (newKey []byte, err error)) (BranchData, error) {
@@ -372,7 +407,7 @@ func (branchData BranchData) ReplacePlainKeys(newData []byte, fn func(key []byte
 			newData = append(newData, branchData[pos:pos+n]...)
 			pos += n
 			if len(branchData) < pos+int(l) {
-				return nil, errors.New("replacePlainKeys buffer too small for hashedKey")
+				return nil, fmt.Errorf("replacePlainKeys buffer too small for hashedKey: expected %d got %d", pos+int(l), len(branchData))
 			}
 			if l > 0 {
 				newData = append(newData, branchData[pos:pos+int(l)]...)
@@ -382,13 +417,13 @@ func (branchData BranchData) ReplacePlainKeys(newData []byte, fn func(key []byte
 		if fieldBits&AccountPlainPart != 0 {
 			l, n := binary.Uvarint(branchData[pos:])
 			if n == 0 {
-				return nil, errors.New("replacePlainKeys buffer too small for accountPlainKey len")
+				return nil, errors.New("replacePlainKeys buffer too small for accountAddr len")
 			} else if n < 0 {
-				return nil, errors.New("replacePlainKeys value overflow for accountPlainKey len")
+				return nil, errors.New("replacePlainKeys value overflow for accountAddr len")
 			}
 			pos += n
 			if len(branchData) < pos+int(l) {
-				return nil, errors.New("replacePlainKeys buffer too small for accountPlainKey")
+				return nil, fmt.Errorf("replacePlainKeys buffer too small for accountAddr: expected %d got %d", pos+int(l), len(branchData))
 			}
 			if l > 0 {
 				pos += int(l)
@@ -399,13 +434,13 @@ func (branchData BranchData) ReplacePlainKeys(newData []byte, fn func(key []byte
 			}
 			if newKey == nil {
 				newData = append(newData, branchData[pos-int(l)-n:pos]...)
-				if l != length.Addr {
-					fmt.Printf("COPY %x LEN %d\n", []byte(branchData[pos-int(l):pos]), l)
-				}
+				//if l != length.Addr {
+				//	fmt.Printf("COPY %x LEN %d\n", []byte(branchData[pos-int(l):pos]), l)
+				//}
 			} else {
-				if len(newKey) > 8 && len(newKey) != length.Addr {
-					fmt.Printf("SHORT %x LEN %d\n", newKey, len(newKey))
-				}
+				//if len(newKey) > 8 && len(newKey) != length.Addr {
+				//	fmt.Printf("SHORT %x LEN %d\n", newKey, len(newKey))
+				//}
 
 				n = binary.PutUvarint(numBuf[:], uint64(len(newKey)))
 				newData = append(newData, numBuf[:n]...)
@@ -415,13 +450,13 @@ func (branchData BranchData) ReplacePlainKeys(newData []byte, fn func(key []byte
 		if fieldBits&StoragePlainPart != 0 {
 			l, n := binary.Uvarint(branchData[pos:])
 			if n == 0 {
-				return nil, errors.New("replacePlainKeys buffer too small for storagePlainKey len")
+				return nil, errors.New("replacePlainKeys buffer too small for storageAddr len")
 			} else if n < 0 {
-				return nil, errors.New("replacePlainKeys value overflow for storagePlainKey len")
+				return nil, errors.New("replacePlainKeys value overflow for storageAddr len")
 			}
 			pos += n
 			if len(branchData) < pos+int(l) {
-				return nil, errors.New("replacePlainKeys buffer too small for storagePlainKey")
+				return nil, fmt.Errorf("replacePlainKeys buffer too small for storageAddr: expected %d got %d", pos+int(l), len(branchData))
 			}
 			if l > 0 {
 				pos += int(l)
@@ -455,13 +490,31 @@ func (branchData BranchData) ReplacePlainKeys(newData []byte, fn func(key []byte
 			newData = append(newData, branchData[pos:pos+n]...)
 			pos += n
 			if len(branchData) < pos+int(l) {
-				return nil, errors.New("replacePlainKeys buffer too small for hash")
+				return nil, fmt.Errorf("replacePlainKeys buffer too small for hash: expected %d got %d", pos+int(l), len(branchData))
 			}
 			if l > 0 {
 				newData = append(newData, branchData[pos:pos+int(l)]...)
 				pos += int(l)
 			}
 		}
+		if fieldBits&LeafHashPart != 0 {
+			l, n := binary.Uvarint(branchData[pos:])
+			if n == 0 {
+				return nil, errors.New("replacePlainKeys buffer too small for acLeaf hash len")
+			} else if n < 0 {
+				return nil, errors.New("replacePlainKeys value overflow for acLeafhash len")
+			}
+			newData = append(newData, branchData[pos:pos+n]...)
+			pos += n
+			if len(branchData) < pos+int(l) {
+				return nil, fmt.Errorf("replacePlainKeys buffer too small for LeafHash: expected %d got %d", pos+int(l), len(branchData))
+			}
+			if l > 0 {
+				newData = append(newData, branchData[pos:pos+int(l)]...)
+				pos += int(l)
+			}
+		}
+
 		bitset ^= bit
 	}
 
@@ -516,7 +569,7 @@ func (branchData BranchData) MergeHexBranches(branchData2 BranchData, newData []
 				newData = append(newData, branchData2[pos2:pos2+n]...)
 				pos2 += n
 				if len(branchData2) < pos2+int(l) {
-					return nil, errors.New("MergeHexBranches buffer2 too small for field")
+					return nil, fmt.Errorf("MergeHexBranches buffer2 too small for %s : expected %d got %d", fieldBits&PartFlags(1<<i), pos2+int(l), len(branchData2))
 				}
 				if l > 0 {
 					newData = append(newData, branchData2[pos2:pos2+int(l)]...)
@@ -543,7 +596,7 @@ func (branchData BranchData) MergeHexBranches(branchData2 BranchData, newData []
 				}
 				pos1 += n
 				if len(branchData) < pos1+int(l) {
-					return nil, errors.New("MergeHexBranches buffer1 too small for field")
+					return nil, fmt.Errorf("MergeHexBranches buffer1 too small for %s : expected %d got %d", fieldBits&PartFlags(1<<i), pos1+int(l), len(branchData))
 				}
 				if l > 0 {
 					if add {
@@ -759,11 +812,11 @@ func DecodeBranchAndCollectStat(key, branch []byte, tv TrieVariant) *BranchStat 
 			stat.MinCellSize = min(stat.MinCellSize, enc)
 			stat.MaxCellSize = max(stat.MaxCellSize, enc)
 			switch {
-			case c.accountPlainKeyLen > 0:
-				stat.APKSize += uint64(c.accountPlainKeyLen)
+			case c.accountAddrLen > 0:
+				stat.APKSize += uint64(c.accountAddrLen)
 				stat.APKCount++
-			case c.storagePlainKeyLen > 0:
-				stat.SPKSize += uint64(c.storagePlainKeyLen)
+			case c.storageAddrLen > 0:
+				stat.SPKSize += uint64(c.storageAddrLen)
 				stat.SPKCount++
 			case c.hashLen > 0:
 				stat.HashSize += uint64(c.hashLen)
@@ -851,6 +904,16 @@ func NewUpdates(m Mode, tmpdir string, hasher keyHasher) *Updates {
 	return t
 }
 
+func (t *Updates) initCollector() {
+	if t.etl != nil {
+		t.etl.Close()
+		t.etl = nil
+	}
+	t.etl = etl.NewCollector("commitment", t.tmpdir, etl.NewSortableBuffer(etl.BufferOptimalSize/4), log.Root().New("update-tree"))
+	t.etl.LogLvl(log.LvlDebug)
+	t.etl.SortAndFlushInBackground(true)
+}
+
 func (t *Updates) Mode() Mode { return t.mode }
 
 func (t *Updates) Size() (updates uint64) {
@@ -862,16 +925,6 @@ func (t *Updates) Size() (updates uint64) {
 	default:
 		return 0
 	}
-}
-
-func (t *Updates) initCollector() {
-	if t.etl != nil {
-		t.etl.Close()
-		t.etl = nil
-	}
-	t.etl = etl.NewCollector("commitment", t.tmpdir, etl.NewSortableBuffer(etl.BufferOptimalSize/2), log.Root().New("update-tree"))
-	t.etl.LogLvl(log.LvlDebug)
-	t.etl.SortAndFlushInBackground(true)
 }
 
 // TouchPlainKey marks plainKey as updated and applies different fn for different key types
@@ -910,7 +963,7 @@ func (t *Updates) TouchAccount(c *KeyUpdate, val []byte) {
 		return
 	}
 	if c.update.Flags&DeleteUpdate != 0 {
-		c.update.Flags = 0
+		c.update.Flags = 0 // also could invert with ^ but 0 is just a reset
 	}
 	nonce, balance, chash := types.DecodeAccountBytesV3(val)
 	if c.update.Nonce != nonce {

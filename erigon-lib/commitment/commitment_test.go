@@ -46,13 +46,13 @@ func generateCellRow(tb testing.TB, size int) (row []*cell, bitmap uint16) {
 		th := rand.Intn(120)
 		switch {
 		case th > 70:
-			n, err = rand.Read(row[i].accountPlainKey[:])
+			n, err = rand.Read(row[i].accountAddr[:])
 			require.NoError(tb, err)
-			row[i].accountPlainKeyLen = n
+			row[i].accountAddrLen = n
 		case th > 20 && th <= 70:
-			n, err = rand.Read(row[i].storagePlainKey[:])
+			n, err = rand.Read(row[i].storageAddr[:])
 			require.NoError(tb, err)
-			row[i].storagePlainKeyLen = n
+			row[i].storageAddrLen = n
 		case th <= 20:
 			n, err = rand.Read(row[i].extension[:th])
 			row[i].extLen = n
@@ -93,10 +93,10 @@ func TestBranchData_MergeHexBranches2(t *testing.T) {
 		}
 		require.EqualValues(t, row[i].extLen, c.extLen)
 		require.EqualValues(t, row[i].extension, c.extension)
-		require.EqualValues(t, row[i].accountPlainKeyLen, c.accountPlainKeyLen)
-		require.EqualValues(t, row[i].accountPlainKey, c.accountPlainKey)
-		require.EqualValues(t, row[i].storagePlainKeyLen, c.storagePlainKeyLen)
-		require.EqualValues(t, row[i].storagePlainKey, c.storagePlainKey)
+		require.EqualValues(t, row[i].accountAddrLen, c.accountAddrLen)
+		require.EqualValues(t, row[i].accountAddr, c.accountAddr)
+		require.EqualValues(t, row[i].storageAddrLen, c.storageAddrLen)
+		require.EqualValues(t, row[i].storageAddr, c.storageAddr)
 		i++
 	}
 }
@@ -134,6 +134,29 @@ func TestBranchData_MergeHexBranches3(t *testing.T) {
 	//_, _ = tm, am
 }
 
+func TestDecodeBranchWithLeafHashes(t *testing.T) {
+	// enc := "00061614a8f8d73af90eee32dc9729ce8d5bb762f30d21a434a8f8d73af90eee32dc9729ce8d5bb762f30d21a49f49fdd48601f00df18ebc29b1264e27d09cf7cbd514fe8af173e534db038033203c7e2acaef5400189202e1a6a3b0b3d9add71fb52ad24ae35be6b6c85ca78bb51214ba7a3b7b095d3370c022ca655c790f0c0ead66f52025c143802ceb44bbe35e883927edb5933fc33416d4cc354dd88c7bcf1aad66a1"
+	// unfoldBranchDataFromString(t, enc)
+
+	row, bm := generateCellRow(t, 16)
+
+	for i := 0; i < len(row); i++ {
+		if row[i].accountAddrLen > 0 {
+			rand.Read(row[i].leafHash[:])
+			row[i].lhLen = 32
+		}
+	}
+
+	be := NewBranchEncoder(1024, t.TempDir())
+	enc, _, err := be.EncodeBranch(bm, bm, bm, func(i int, skip bool) (*cell, error) {
+		return row[i], nil
+	})
+	require.NoError(t, err)
+
+	fmt.Printf("%s\n", enc.String())
+
+}
+
 // helper to decode row of cells from string
 func unfoldBranchDataFromString(tb testing.TB, encs string) (row []*cell, am uint16) {
 	tb.Helper()
@@ -166,13 +189,13 @@ func TestBranchData_ReplacePlainKeys(t *testing.T) {
 		if c == nil {
 			continue
 		}
-		if c.accountPlainKeyLen > 0 {
-			offt, _ := binary.Uvarint(c.accountPlainKey[:c.accountPlainKeyLen])
-			t.Logf("%d apk %x, offt %d\n", i, c.accountPlainKey[:c.accountPlainKeyLen], offt)
+		if c.accountAddrLen > 0 {
+			offt, _ := binary.Uvarint(c.accountAddr[:c.accountAddrLen])
+			t.Logf("%d apk %x, offt %d\n", i, c.accountAddr[:c.accountAddrLen], offt)
 		}
-		if c.storagePlainKeyLen > 0 {
-			offt, _ := binary.Uvarint(c.storagePlainKey[:c.storagePlainKeyLen])
-			t.Logf("%d spk %x offt %d\n", i, c.storagePlainKey[:c.storagePlainKeyLen], offt)
+		if c.storageAddrLen > 0 {
+			offt, _ := binary.Uvarint(c.storageAddr[:c.storageAddrLen])
+			t.Logf("%d spk %x offt %d\n", i, c.storageAddr[:c.storageAddrLen], offt)
 		}
 
 	}

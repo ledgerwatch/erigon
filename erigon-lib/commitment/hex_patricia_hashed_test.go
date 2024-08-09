@@ -361,9 +361,11 @@ func Test_HexPatriciaHashed_UniqueRepresentation(t *testing.T) {
 		Balance("b13363d527cdc18173c54ac5d4a54af05dbec22e", 4*1e17).
 		Balance("d995768ab23a0a333eb9584df006da740e66f0aa", 5).
 		Balance("eabf041afbb6c6059fbd25eab0d3202db84e842d", 6).
+		Balance("8e5476fc5990638a4fb0b5fd3f61bb4b5c5f395e", 1237).
 		Balance("93fe03620e4d70ea39ab6e8c0e04dd0d83e041f2", 7).
 		Balance("ba7a3b7b095d3370c022ca655c790f0c0ead66f5", 5*1e17).
 		Storage("ba7a3b7b095d3370c022ca655c790f0c0ead66f5", "0fa41642c48ecf8f2059c275353ce4fee173b3a8ce5480f040c4d2901603d14e", "050505").
+		CodeHash("ba7a3b7b095d3370c022ca655c790f0c0ead66f5", "24f3a02dc65eda502dbf75919e795458413d3c45b38bb35b51235432707900ed").
 		Balance("a8f8d73af90eee32dc9729ce8d5bb762f30d21a4", 9*1e16).
 		Storage("93fe03620e4d70ea39ab6e8c0e04dd0d83e041f2", "de3fea338c95ca16954e80eb603cd81a261ed6e2b10a03d0c86cf953fe8769a4", "060606").
 		Balance("14c4d3bba7f5009599257d3701785d34c7f2aa27", 6*1e18).
@@ -482,41 +484,31 @@ func Test_HexPatriciaHashed_Sepolia(t *testing.T) {
 func Test_Cell_EncodeDecode(t *testing.T) {
 	rnd := rand.New(rand.NewSource(time.Now().UnixMilli()))
 	first := &cell{
-		hashLen:            length.Hash,
-		accountPlainKeyLen: length.Addr,
-		storagePlainKeyLen: length.Addr + length.Hash,
-		downHashedLen:      rnd.Intn(129),
-		extLen:             rnd.Intn(65),
-		downHashedKey:      [128]byte{},
-		extension:          [64]byte{},
-		storagePlainKey:    [52]byte{},
-		hash:               [32]byte{},
-		accountPlainKey:    [20]byte{},
+		hashLen:         length.Hash,
+		accountAddrLen:  length.Addr,
+		storageAddrLen:  length.Addr + length.Hash,
+		hashedExtLen:    rnd.Intn(129),
+		extLen:          rnd.Intn(65),
+		hashedExtension: [128]byte{},
+		extension:       [64]byte{},
+		storageAddr:     [52]byte{},
+		hash:            [32]byte{},
+		accountAddr:     [20]byte{},
 	}
 	b := uint256.NewInt(rnd.Uint64())
 	first.Balance = *b
 
-	rnd.Read(first.downHashedKey[:first.downHashedLen])
+	rnd.Read(first.hashedExtension[:first.hashedExtLen])
 	rnd.Read(first.extension[:first.extLen])
-	rnd.Read(first.storagePlainKey[:])
-	rnd.Read(first.accountPlainKey[:])
+	rnd.Read(first.storageAddr[:])
+	rnd.Read(first.accountAddr[:])
 	rnd.Read(first.hash[:])
 
 	second := new(cell)
 	err := second.Decode(first.Encode())
 	require.NoError(t, err)
 
-	require.EqualValues(t, first.downHashedLen, second.downHashedLen)
-	require.EqualValues(t, first.downHashedKey[:], second.downHashedKey[:])
-	require.EqualValues(t, first.accountPlainKeyLen, second.accountPlainKeyLen)
-	require.EqualValues(t, first.storagePlainKeyLen, second.storagePlainKeyLen)
-	require.EqualValues(t, first.hashLen, second.hashLen)
-	require.EqualValues(t, first.accountPlainKey[:], second.accountPlainKey[:])
-	require.EqualValues(t, first.storagePlainKey[:], second.storagePlainKey[:])
-	require.EqualValues(t, first.hash[:], second.hash[:])
-	require.EqualValues(t, first.extension[:first.extLen], second.extension[:second.extLen])
-
-	// encode doesn't code Nonce, Balance, CodeHash and Storage, Delete fields
+	cellMustEqual(t, first, second)
 }
 
 func Test_HexPatriciaHashed_StateEncode(t *testing.T) {
@@ -1130,4 +1122,66 @@ func TestCell_setFromUpdate(t *testing.T) {
 	require.EqualValues(t, EmptyCodeHashArray[:], target.CodeHash)
 	require.EqualValues(t, update.StorageLen, target.StorageLen)
 	require.EqualValues(t, update.Storage[:update.StorageLen], target.Storage[:target.StorageLen])
+}
+
+func TestCell_fillFromFields(t *testing.T) {
+	row, bm := generateCellRow(t, 16)
+	rnd := rand.New(rand.NewSource(0))
+
+	cg := func(nibble int, skip bool) (*cell, error) {
+		c := row[nibble]
+		if c.storageAddrLen > 0 || c.accountAddrLen > 0 {
+			rnd.Read(c.leafHash[:])
+			c.lhLen = 32
+		}
+		fmt.Printf("enc cell %x %v\n", nibble, c.FullString())
+
+		return c, nil
+	}
+
+	be := NewBranchEncoder(1024, t.TempDir())
+	enc, _, err := be.EncodeBranch(bm, bm, bm, cg)
+	require.NoError(t, err)
+
+	//original := common.Copy(enc)
+	fmt.Printf("%s\n", enc.String())
+
+	tm, am, decRow, err := enc.decodeCells()
+	require.NoError(t, err)
+	require.EqualValues(t, bm, am)
+	require.EqualValues(t, bm, tm)
+
+	for i := 0; i < len(decRow); i++ {
+		t.Logf("cell %d\n", i)
+		first, second := row[i], decRow[i]
+		// after decoding extension == hashedExtension, dhk will be derived from extension
+		require.EqualValues(t, second.extLen, second.hashedExtLen)
+		require.EqualValues(t, first.extLen, second.hashedExtLen)
+		require.EqualValues(t, second.extension[:second.extLen], second.hashedExtension[:second.hashedExtLen])
+
+		require.EqualValues(t, first.hashLen, second.hashLen)
+		require.EqualValues(t, first.hash[:first.hashLen], second.hash[:second.hashLen])
+		require.EqualValues(t, first.accountAddrLen, second.accountAddrLen)
+		require.EqualValues(t, first.storageAddrLen, second.storageAddrLen)
+		require.EqualValues(t, first.accountAddr[:], second.accountAddr[:])
+		require.EqualValues(t, first.storageAddr[:], second.storageAddr[:])
+		require.EqualValues(t, first.extension[:first.extLen], second.extension[:second.extLen])
+		require.EqualValues(t, first.leafHash[:first.lhLen], second.leafHash[:second.lhLen])
+	}
+}
+
+func cellMustEqual(tb testing.TB, first, second *cell) {
+	tb.Helper()
+	require.EqualValues(tb, first.hashedExtLen, second.hashedExtLen)
+	require.EqualValues(tb, first.hashedExtension[:first.hashedExtLen], second.hashedExtension[:second.hashedExtLen])
+	require.EqualValues(tb, first.hashLen, second.hashLen)
+	require.EqualValues(tb, first.hash[:first.hashLen], second.hash[:second.hashLen])
+	require.EqualValues(tb, first.accountAddrLen, second.accountAddrLen)
+	require.EqualValues(tb, first.storageAddrLen, second.storageAddrLen)
+	require.EqualValues(tb, first.accountAddr[:], second.accountAddr[:])
+	require.EqualValues(tb, first.storageAddr[:], second.storageAddr[:])
+	require.EqualValues(tb, first.extension[:first.extLen], second.extension[:second.extLen])
+	require.EqualValues(tb, first.leafHash[:first.lhLen], second.leafHash[:second.lhLen])
+
+	// encode doesn't code Nonce, Balance, CodeHash and Storage, Delete fields
 }
