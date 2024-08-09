@@ -32,6 +32,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/elastic/go-freelru"
 	"github.com/erigontech/erigon-lib/metrics"
 	btree2 "github.com/tidwall/btree"
 	"golang.org/x/sync/errgroup"
@@ -708,6 +709,16 @@ type DomainRoTx struct {
 	comBuf []byte
 
 	valsC kv.Cursor
+
+	// latestStateCache can be very big if .kv is not compressed - because can store pointer to `mmap` instead of data
+	latestStateCache *freelru.LRU[u128, fileCacheItem]
+}
+
+const latestStateCachePerDomain = 128
+
+type fileCacheItem struct {
+	lvl uint8
+	v   []byte // pointer to `mmap` - if .kv file is not compressed
 }
 
 func domainReadMetric(name kv.Domain, level int) metrics.Summary {
@@ -856,6 +867,7 @@ func (d *Domain) BeginFilesRo() *DomainRoTx {
 			files[i].src.refcount.Add(1)
 		}
 	}
+
 	return &DomainRoTx{
 		name:  d.name,
 		d:     d,
@@ -1383,18 +1395,40 @@ var (
 	UseBtree = true // if true, will use btree for all files
 )
 
+func u32noHash(u uint32) uint32        { return u }            //nolint
+func u64noHash(u uint64) uint32        { return uint32(u) }    //nolint
+func u128noHash(u u128) uint32         { return uint32(u.hi) } //nolint
+func u192noHash(u u192) uint32         { return uint32(u.hi) } //nolint
+type u128 struct{ hi, lo uint64 }      //nolint
+type u192 struct{ hi, lo, ext uint64 } //nolint
+
 func (dt *DomainRoTx) getFromFiles(filekey []byte) (v []byte, found bool, fileStartTxNum uint64, fileEndTxNum uint64, err error) {
 	if len(dt.files) == 0 {
-		return nil, false, 0, 0, err
+		return
 	}
 
-	hi, _ := dt.ht.iit.hashKey(filekey)
+	hi, lo := dt.ht.iit.hashKey(filekey)
+	if dt.name != kv.CommitmentDomain {
+		if dt.latestStateCache == nil {
+			dt.latestStateCache, err = freelru.New[u128, fileCacheItem](latestStateCachePerDomain, u128noHash)
+			if err != nil {
+				panic(err)
+			}
+		}
+		cv, ok := dt.latestStateCache.Get(u128{hi: hi, lo: lo})
+		if ok {
+			//if dbg.KVReadLevelledMetrics {
+			//m := dt.latestStateCache.Metrics()
+			//if m.Hits%1000 == 0 {
+			//	log.Warn("[dbg] lEachCache", "a", dt.name.String(), "hit", m.Hits, "total", m.Hits+m.Misses, "Collisions", m.Collisions, "Evictions", m.Evictions, "Inserts", m.Inserts, "limit", latestStateCachePerDomain, "ratio", fmt.Sprintf("%.2f", float64(m.Hits)/float64(m.Hits+m.Misses)))
+			//}
+			//}
+			return cv.v, true, dt.files[cv.lvl].startTxNum, dt.files[cv.lvl].endTxNum, nil
+		}
+	}
 
 	for i := len(dt.files) - 1; i >= 0; i-- {
 		if dt.d.indexList&withExistence != 0 {
-			//if dt.files[i].src.existence == nil {
-			//	panic(dt.files[i].src.decompressor.FileName())
-			//}
 			if dt.files[i].src.existence != nil {
 				if !dt.files[i].src.existence.ContainsHash(hi) {
 					if traceGetLatest == dt.name {
@@ -1413,7 +1447,6 @@ func (dt *DomainRoTx) getFromFiles(filekey []byte) (v []byte, found bool, fileSt
 			}
 		}
 
-		//t := time.Now()
 		v, found, err = dt.getFromFile(i, filekey)
 		if err != nil {
 			return nil, false, 0, 0, err
@@ -1422,19 +1455,24 @@ func (dt *DomainRoTx) getFromFiles(filekey []byte) (v []byte, found bool, fileSt
 			if traceGetLatest == dt.name {
 				fmt.Printf("GetLatest(%s, %x) -> not found in file %s\n", dt.name.String(), filekey, dt.files[i].src.decompressor.FileName())
 			}
-			//	LatestStateReadGrindNotFound.ObserveDuration(t)
 			continue
 		}
 		if traceGetLatest == dt.name {
 			fmt.Printf("GetLatest(%s, %x) -> found in file %s\n", dt.name.String(), filekey, dt.files[i].src.decompressor.FileName())
 		}
-		//LatestStateReadGrind.ObserveDuration(t)
+
+		if dt.name != kv.CommitmentDomain {
+			dt.latestStateCache.Add(u128{hi: hi, lo: lo}, fileCacheItem{lvl: uint8(i), v: v})
+		}
 		return v, true, dt.files[i].startTxNum, dt.files[i].endTxNum, nil
 	}
 	if traceGetLatest == dt.name {
 		fmt.Printf("GetLatest(%s, %x) -> not found in %d files\n", dt.name.String(), filekey, len(dt.files))
 	}
 
+	if dt.name != kv.CommitmentDomain {
+		dt.latestStateCache.Add(u128{hi: hi, lo: lo}, fileCacheItem{lvl: 0, v: nil})
+	}
 	return nil, false, 0, 0, nil
 }
 
@@ -1450,7 +1488,7 @@ func (dt *DomainRoTx) GetAsOf(key []byte, txNum uint64, roTx kv.Tx) ([]byte, err
 		// domain must return nil
 		if len(v) == 0 {
 			if traceGetAsOf == dt.d.filenameBase {
-				fmt.Printf("GetAsOf(%s, %x, %d) -> not found in history\n", dt.d.filenameBase, key, txNum)
+				fmt.Printf("GetAsOf(%s  , %x, %d) -> not found in history\n", dt.d.filenameBase, key, txNum)
 			}
 			return nil, nil
 		}
@@ -1532,17 +1570,10 @@ func (dt *DomainRoTx) valsCursor(tx kv.Tx) (c kv.Cursor, err error) {
 
 	if dt.d.largeVals {
 		dt.valsC, err = tx.Cursor(dt.d.valsTable)
-		if err != nil {
-			return nil, fmt.Errorf("valsCursor: %w", err)
-		}
-	} else {
-		dt.valsC, err = tx.CursorDupSort(dt.d.valsTable)
-		if err != nil {
-			return nil, fmt.Errorf("valsCursor: %w", err)
-		}
+		return dt.valsC, err
 	}
-
-	return dt.valsC, nil
+	dt.valsC, err = tx.CursorDupSort(dt.d.valsTable)
+	return dt.valsC, err
 }
 
 func (dt *DomainRoTx) getLatestFromDb(key []byte, roTx kv.Tx) ([]byte, uint64, bool, error) {
@@ -1556,7 +1587,7 @@ func (dt *DomainRoTx) getLatestFromDb(key []byte, roTx kv.Tx) ([]byte, uint64, b
 		var fullkey []byte
 		fullkey, v, err = valsC.Seek(key)
 		if err != nil {
-			return nil, 0, false, err
+			return nil, 0, false, fmt.Errorf("valsCursor.Seek: %w", err)
 		}
 		if len(fullkey) == 0 {
 			return nil, 0, false, nil // This key is not in DB
