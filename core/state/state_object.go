@@ -224,6 +224,9 @@ func (so *stateObject) SetState(key *libcommon.Hash, value uint256.Int) {
 		key:      *key,
 		prevalue: prev,
 	})
+	if so.db.logger != nil && so.db.logger.OnStorageChange != nil {
+		so.db.logger.OnStorageChange(so.address, key, prev, value)
+	}
 	so.setState(key, value)
 }
 
@@ -297,6 +300,9 @@ func (so *stateObject) SetBalance(amount *uint256.Int, reason tracing.BalanceCha
 		account: &so.address,
 		prev:    so.data.Balance,
 	})
+	if so.db.logger != nil && so.db.logger.OnBalanceChange != nil {
+		so.db.logger.OnBalanceChange(so.address, so.Balance(), amount, reason)
+	}
 	so.setBalance(amount)
 }
 
@@ -344,6 +350,9 @@ func (so *stateObject) SetCode(codeHash libcommon.Hash, code []byte) {
 		prevhash: so.data.CodeHash,
 		prevcode: prevcode,
 	})
+	if so.db.logger != nil && so.db.logger.OnCodeChange != nil {
+		so.db.logger.OnCodeChange(so.address, so.data.CodeHash, prevcode, codeHash, code)
+	}
 	so.setCode(codeHash, code)
 }
 
@@ -358,6 +367,9 @@ func (so *stateObject) SetNonce(nonce uint64) {
 		account: &so.address,
 		prev:    so.data.Nonce,
 	})
+	if so.db.logger != nil && so.db.logger.OnNonceChange != nil {
+		so.db.logger.OnNonceChange(so.address, so.data.Nonce, nonce)
+	}
 	so.setNonce(nonce)
 }
 
