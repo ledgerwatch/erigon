@@ -507,10 +507,7 @@ func (tds *TrieDbState) updateTrieRoots(forward bool) ([]common.Hash, error) {
 			}
 
 			if accountWithAddress, ok := b.accountUpdates[addrHash]; ok && accountWithAddress.Account != nil {
-				ok, root, err := tds.t.DeepHash(addrHash[:])
-				if err != nil {
-					return nil, err
-				}
+				ok, root, _ := tds.t.DeepHash(addrHash[:])
 				if ok {
 					accountWithAddress.Account.Root = root
 					//fmt.Printf("(b)Set %x root for addrHash %x\n", root, addrHash)
